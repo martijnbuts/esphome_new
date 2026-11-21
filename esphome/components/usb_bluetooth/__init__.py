@@ -31,6 +31,7 @@ DOMAIN = "usb_bluetooth"
 CODEOWNERS = ["@martijnbuts"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["usb_host"]
+MULTI_CONF = True
 
 CONF_FIRMWARE = "firmware"
 CONF_FIRMWARE_CONFIG = "firmware_config"
