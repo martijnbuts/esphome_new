@@ -277,6 +277,9 @@ class USBHost final : public Component {
   void setup() override;
 
  protected:
+#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+  void hold_full_speed_();
+#endif
   std::vector<USBClient *> clients_{};
 };
 
