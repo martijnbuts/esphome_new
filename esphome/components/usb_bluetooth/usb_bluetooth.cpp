@@ -73,12 +73,22 @@ void detach_bluedroid() {
 
 bool bluedroid_controller_ready() { return g_bluedroid_dongle != nullptr && g_bluedroid_dongle->is_ready(); }
 
-void USBBluetooth::set_bluedroid() { g_bluedroid_dongle = this; }
+void USBBluetooth::set_bluedroid() {
+  g_bluedroid_dongle = this;
+  this->hci_command_.reserve(3 + 255);
+}
 
 // Bluedroid's tasks. Commands go to endpoint 0, ACL data to the bulk OUT endpoint; the H4 type byte is not sent.
 void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
-  if (len < 2 || !this->is_ready())
+  if (len < 2)
     return;
+  if (!this->is_ready()) {
+    // The dongle is gone. Bluedroid still sends commands while esp32_ble takes it down and waits for
+    // their answers, so they are answered here and it can finish
+    if (h4[0] == H4_COMMAND && len >= 3)
+      this->answer_without_controller_(encode_uint16(h4[2], h4[1]));
+    return;
+  }
   bool sent = false;
   auto done = [this](const usb_host::TransferStatus &status) {
     if (!status.success)
@@ -86,8 +96,9 @@ void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
     this->send_done_();
   };
   if (h4[0] == H4_COMMAND) {
-    sent = this->control_transfer(HCI_COMMAND_REQUEST_TYPE, 0, 0, this->intf_, done,
-                                  std::vector<uint8_t>(h4 + 1, h4 + len));
+    // Bluedroid sends one command at a time from its HCI task: one buffer, reserved once, holds it
+    this->hci_command_.assign(h4 + 1, h4 + len);
+    sent = this->control_transfer(HCI_COMMAND_REQUEST_TYPE, 0, 0, this->intf_, done, this->hci_command_);
   } else if (h4[0] == H4_ACL) {
     sent = this->transfer_out(this->acl_out_ep_, done, h4 + 1, len - 1);
   }
@@ -95,6 +106,51 @@ void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
     ESP_LOGW(TAG, "HCI packet type %u dropped", h4[0]);
     this->send_blocked_.store(true, std::memory_order_release);
   }
+}
+
+// Commands the controller answers with a Command Status event; it answers all others with Command Complete
+static constexpr uint16_t STATUS_OPCODES[] = {
+    0x0406,  // Disconnect
+    0x041D,  // Read Remote Version Information
+    0x200D,  // LE Create Connection
+    0x2013,  // LE Connection Update
+    0x2016,  // LE Read Remote Features
+    0x2019,  // LE Enable Encryption
+    0x2025,  // LE Read Local P-256 Public Key
+    0x2026,  // LE Generate DHKey
+    0x2032,  // LE Set PHY
+    0x2043,  // LE Extended Create Connection
+};
+
+// Bluedroid's HCI task. A Command Complete with status success, or a Command Status with Command Disallowed for
+// commands that would otherwise start something on the air, so no completion event is waited for.
+void USBBluetooth::answer_without_controller_(uint16_t opcode) {
+  static constexpr uint8_t STATUS_COMMAND_DISALLOWED = 0x0C;
+  bool status_event = false;
+  for (uint16_t op : STATUS_OPCODES)
+    status_event |= op == opcode;
+  // H4 type, event code, parameter length, then the parameters; Command Complete gets zeroed return
+  // parameters, so a reader of a few more bytes finds them
+  uint8_t event[3 + 4 + 8]{};
+  event[0] = H4_EVENT;
+  size_t len;
+  if (status_event) {
+    event[1] = 0x0F;
+    event[2] = 4;
+    event[3] = STATUS_COMMAND_DISALLOWED;
+    event[4] = 1;
+    event[5] = static_cast<uint8_t>(opcode & 0xFF);
+    event[6] = static_cast<uint8_t>(opcode >> 8);
+    len = 7;
+  } else {
+    event[1] = HCI_EVENT_COMMAND_COMPLETE;
+    event[2] = 4 + 8;
+    event[3] = 1;
+    event[4] = static_cast<uint8_t>(opcode & 0xFF);
+    event[5] = static_cast<uint8_t>(opcode >> 8);
+    len = sizeof(event);
+  }
+  this->to_host_(event, len);
 }
 
 bool USBBluetooth::hci_send_available() const {
@@ -253,7 +309,8 @@ void USBBluetooth::on_disconnected() {
   }
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
   // Bluedroid reads its controller once, when it starts: take it down now and bring it back on the next dongle
-  if (this->host_attached_.exchange(false, std::memory_order_acq_rel)) {
+  // Bluedroid stays attached until esp32_ble has taken it down; answer_without_controller_() answers it meanwhile
+  if (this->host_attached_.load(std::memory_order_acquire) && !this->restart_host_) {
     this->restart_host_ = true;
     esp32_ble::global_ble->disable();
   }

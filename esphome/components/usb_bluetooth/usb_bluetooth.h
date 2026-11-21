@@ -87,6 +87,8 @@ class USBBluetooth final : public usb_host::USBClient {
   void to_host_(uint8_t *h4, size_t len);
   // USB task: a command or ACL transfer to the dongle finished
   void send_done_();
+  // Bluedroid's HCI task: answer a command while there is no dongle
+  void answer_without_controller_(uint16_t opcode);
 #endif
   // Main loop.
   void send_command_(uint16_t opcode, const uint8_t *params, size_t len);
@@ -113,6 +115,8 @@ class USBBluetooth final : public usb_host::USBClient {
   uint8_t acl_h4_[1 + ACL_MAX]{};
   size_t acl_len_{0};
   const ::esp_bluedroid_hci_driver_callbacks *host_{nullptr};
+  // The command Bluedroid is sending, reserved once so a command allocates nothing
+  std::vector<uint8_t> hci_command_{};
   // Bluedroid owns the HCI traffic: events go to it rather than to the probe
   std::atomic<bool> host_attached_{false};
   // A send was refused for want of transfer slots; Bluedroid is told once one is free
