@@ -19,6 +19,10 @@ struct esp_bluedroid_hci_driver_callbacks;
 
 namespace esphome::usb_bluetooth {
 
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+class USBBluetoothSpeaker;
+#endif
+
 /// A USB Bluetooth dongle (Bluetooth Core Specification, USB transport) as a usb_host client.
 ///
 /// HCI commands are class requests on endpoint 0, events arrive on the interrupt IN endpoint of
@@ -68,6 +72,16 @@ class USBBluetooth final : public usb_host::USBClient {
   void set_classic_discovering_(bool discovering) { this->classic_discovering_ = discovering; }
 #endif
 #ifdef USE_USB_BLUETOOTH_A2DP
+  enum A2dpState : uint8_t {
+    A2DP_IDLE,
+    A2DP_CONNECTING,
+    A2DP_CONNECTED,
+    A2DP_READY,
+    A2DP_STARTING,
+    A2DP_STREAMING,
+    A2DP_SUSPENDING,
+    A2DP_SUSPENDED,
+  };
   /// The A2DP sink (speaker) to connect to and stream to, as a 48-bit address.
   void set_a2dp_speaker(uint64_t address);
   /// Play the test tone (10 s of beeps).
@@ -76,6 +90,14 @@ class USBBluetooth final : public usb_host::USBClient {
   void set_volume(float level);
   /// The volume the speaker reports, in percent; NAN while unknown.
   float speaker_volume() const;
+  /// Silence the audio to the speaker.
+  void set_mute(bool mute) { this->a2dp_mute_.store(mute, std::memory_order_release); }
+  /// Whether the A2DP connection to the speaker is up.
+  bool a2dp_connected() const { return this->a2dp_state_.load(std::memory_order_acquire) >= A2DP_CONNECTED; }
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  /// The speaker component whose audio is streamed (instead of the test tone).
+  void set_a2dp_source(USBBluetoothSpeaker *source) { this->a2dp_source_ = source; }
+#endif
   // Bluedroid's BTC task (AVRCP)
   void avrc_connected_(bool connected);
   void avrc_absolute_volume_(bool supported);
@@ -184,17 +206,9 @@ class USBBluetooth final : public usb_host::USBClient {
   std::atomic<bool> classic_discovering_{false};
 #endif
 #ifdef USE_USB_BLUETOOTH_A2DP
-  enum A2dpState : uint8_t {
-    A2DP_IDLE,
-    A2DP_CONNECTING,
-    A2DP_CONNECTED,
-    A2DP_READY,
-    A2DP_STARTING,
-    A2DP_STREAMING,
-    A2DP_SUSPENDING,
-    A2DP_SUSPENDED,
-  };
   void a2dp_poll_();
+  // A2DP source task: the test tone
+  void tone_fill_(int16_t *frames, size_t count);
   std::atomic<uint8_t> a2dp_state_{A2DP_IDLE};
   uint8_t a2dp_peer_[6]{};
   uint32_t a2dp_last_try_{0};
@@ -208,6 +222,12 @@ class USBBluetooth final : public usb_host::USBClient {
   std::atomic<int> speaker_volume_{-1};
   std::atomic<bool> avrc_connected_flag_{false};
   std::atomic<bool> avrc_abs_volume_{false};
+  std::atomic<bool> a2dp_mute_{false};
+  // When audio was last wanted, so the stream is suspended a while after it stops
+  uint32_t a2dp_last_wanted_{0};
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  USBBluetoothSpeaker *a2dp_source_{nullptr};
+#endif
 #endif
 
   uint32_t fragment_{0};

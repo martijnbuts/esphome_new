@@ -19,6 +19,9 @@
 #include "esp_gap_bt_api.h"
 #include <cmath>
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+#include "speaker/usb_bluetooth_speaker.h"
+#endif
 #ifdef USE_USB_BLUETOOTH_A2DP
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
@@ -835,6 +838,25 @@ static int32_t a2dp_data(uint8_t *buf, int32_t len) {
 }
 
 void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  if (this->a2dp_source_ != nullptr && !this->a2dp_test_tone_) {
+    this->a2dp_source_->fill(frames, count);
+  } else
+#endif
+  {
+    this->tone_fill_(frames, count);
+  }
+  if (this->a2dp_mute_.load(std::memory_order_acquire)) {
+    memset(frames, 0, count * 4);
+  } else if (this->a2dp_gain_ < 0.999f) {
+    // A speaker without absolute volume: scale the samples
+    const float gain = this->a2dp_gain_;
+    for (size_t i = 0; i < 2 * count; i++)
+      frames[i] = static_cast<int16_t>(frames[i] * gain);
+  }
+}
+
+void USBBluetooth::tone_fill_(int16_t *frames, size_t count) {
   static constexpr float TWO_PI = 6.28318530718f;
   const uint32_t tone_samples = this->a2dp_test_tone_ ? A2DP_RATE * TEST_TONE_MS / 1000 : 0;
   for (size_t i = 0; i < count; i++) {
@@ -845,7 +867,7 @@ void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
       this->a2dp_phase_ += TWO_PI * 440.0f / A2DP_RATE;
       if (this->a2dp_phase_ > TWO_PI)
         this->a2dp_phase_ -= TWO_PI;
-      v = static_cast<int16_t>(TEST_TONE_AMPLITUDE * this->a2dp_gain_ * sinf(this->a2dp_phase_));
+      v = static_cast<int16_t>(TEST_TONE_AMPLITUDE * sinf(this->a2dp_phase_));
     }
     frames[2 * i] = v;
     frames[2 * i + 1] = v;
@@ -1000,7 +1022,14 @@ void USBBluetooth::play_test_tone() {
 
 // Main loop
 void USBBluetooth::a2dp_poll_() {
+  static constexpr uint32_t SUSPEND_AFTER_MS = 3000;
   const uint32_t now = millis();
+  bool wanted = this->a2dp_test_tone_;
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  wanted |= this->a2dp_source_ != nullptr && this->a2dp_source_->wants_stream();
+#endif
+  if (wanted)
+    this->a2dp_last_wanted_ = now;
   switch (this->a2dp_state_.load(std::memory_order_acquire)) {
     case A2DP_IDLE:
       if (now - this->a2dp_last_try_ < A2DP_RETRY_MS && this->a2dp_last_try_ != 0)
@@ -1018,8 +1047,12 @@ void USBBluetooth::a2dp_poll_() {
       return;
     case A2DP_CONNECTED:
       // Only stream when there is something to play; the remote end is set up for media once this is acknowledged
-      if (this->a2dp_test_tone_)
+      if (wanted)
         esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      return;
+    case A2DP_SUSPENDED:
+      if (wanted)
+        this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
       return;
     case A2DP_READY:
       this->a2dp_sample_ = 0;
@@ -1027,9 +1060,11 @@ void USBBluetooth::a2dp_poll_() {
       esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
       return;
     case A2DP_STREAMING:
-      // After the tone, suspend: the connection stays, the speaker goes quiet
-      if (this->a2dp_test_tone_ && this->a2dp_sample_ > A2DP_RATE * (TEST_TONE_MS / 1000 + 1)) {
+      // The test tone ends after TEST_TONE_MS
+      if (this->a2dp_test_tone_ && this->a2dp_sample_ > A2DP_RATE * (TEST_TONE_MS / 1000 + 1))
         this->a2dp_test_tone_ = false;
+      // Nothing to play for a while: suspend; the connection stays and the speaker can go idle
+      if (!wanted && now - this->a2dp_last_wanted_ > SUSPEND_AFTER_MS) {
         this->a2dp_state_.store(A2DP_SUSPENDING, std::memory_order_release);
         esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
       }

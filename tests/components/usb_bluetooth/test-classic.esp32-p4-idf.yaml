@@ -12,3 +12,7 @@ esp32_ble_tracker:
 
 bluetooth_proxy:
   active: true
+
+speaker:
+  - platform: usb_bluetooth
+    id: bt_speaker
