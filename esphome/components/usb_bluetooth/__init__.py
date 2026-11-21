@@ -1,7 +1,14 @@
 """A USB Bluetooth dongle (HCI over USB) as a usb_host client."""
 
 import esphome.codegen as cg
-from esphome.components.const import CONF_FIRMWARE, CONF_MANUFACTURER
+from esphome.components.const import CONF_MANUFACTURER
+
+# Experiment branch only: CONF_FIRMWARE moves to components/const in esphome#23027. Until that is in the
+# ESPHome version that builds this as an external component, fall back to defining it here.
+try:
+    from esphome.components.const import CONF_FIRMWARE
+except ImportError:  # pragma: no cover
+    CONF_FIRMWARE = "firmware"
 from esphome.components.esp32 import (
     VARIANT_ESP32H4,
     VARIANT_ESP32P4,
