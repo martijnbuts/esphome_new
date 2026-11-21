@@ -61,7 +61,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_NUM_CHANNELS, default=A2DP_CHANNELS): cv.one_of(
                 A2DP_CHANNELS, int=True
             ),
-            cv.Optional(CONF_BITS_PER_SAMPLE, default=A2DP_BITS): cv.All(
+            cv.Optional(CONF_BITS_PER_SAMPLE, default=f"{A2DP_BITS}bit"): cv.All(
                 cv.float_with_unit("bits", "bit"), cv.one_of(A2DP_BITS, int=True)
             ),
         }
