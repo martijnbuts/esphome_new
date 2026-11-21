@@ -4,7 +4,7 @@
 #include "usb_host.h"
 #include <cinttypes>
 #include "esphome/core/log.h"
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
 #include "soc/usb_dwc_struct.h"
 #endif
 
@@ -24,7 +24,7 @@ void USBHost::setup() {
     this->mark_failed();
     return;
   }
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
   this->hold_full_speed_();
 #endif
 #ifdef USE_USB_HOST_LIB_TASK
@@ -46,7 +46,7 @@ void USBHost::lib_task_fn(void *arg) {
   while (true) {
     uint32_t event_flags;
     usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
     // A port recovery runs inside usb_host_lib_handle_events() and soft resets the core
     host->hold_full_speed_();
 #endif
@@ -54,7 +54,7 @@ void USBHost::lib_task_fn(void *arg) {
 }
 #endif
 
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
 // espressif/usb 1.6 has usb_host_config_t.fsls_only, but it needs USB DWC HAL support that ESP-IDF 6.1 does not
 // have and refuses the option there. HCFG.FSLSSupp is only cleared by a core soft reset (at install and when the
 // root port recovers), so it is set after install and again whenever it reads back clear.
@@ -74,7 +74,7 @@ void USBHost::loop() {
   if (event_flags != 0) {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
   // A port recovery runs inside usb_host_lib_handle_events() and soft resets the core
   this->hold_full_speed_();
 #endif

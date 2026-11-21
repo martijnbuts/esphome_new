@@ -504,8 +504,8 @@ void USBBluetooth::handle_command_complete_(const uint8_t *ret, size_t len) {
       ESP_LOGI(TAG,
                "Controller ready: Bluetooth %s, manufacturer %u, address %02X:%02X:%02X:%02X:%02X:%02X, name '%.*s'",
                core_version(this->hci_version_), this->manufacturer_, this->address_[0], this->address_[1],
-               this->address_[2], this->address_[3], this->address_[4], this->address_[5],
-               static_cast<int>(name_len), reinterpret_cast<const char *>(ret));
+               this->address_[2], this->address_[3], this->address_[4], this->address_[5], static_cast<int>(name_len),
+               reinterpret_cast<const char *>(ret));
       this->finish_probe_(true);
       return;
     }

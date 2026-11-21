@@ -277,7 +277,7 @@ class USBHost final : public Component {
   void setup() override;
 
  protected:
-#ifdef USE_USB_HOST_FULL_SPEED_ONLY
+#if defined(USE_USB_HOST_FULL_SPEED_ONLY) && defined(USE_ESP32_VARIANT_ESP32P4)
   void hold_full_speed_();
 #endif
 #ifdef USE_USB_HOST_LIB_TASK
