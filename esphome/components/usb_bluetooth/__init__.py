@@ -158,10 +158,8 @@ def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
         raise cv.Invalid(
             f"{CONF_BLUEDROID} is for esp32_ble, which this configuration does not have"
         )
-    if "esp32_hosted" in full:
-        raise cv.Invalid(
-            f"{CONF_BLUEDROID}: esp32_ble already uses the co-processor of esp32_hosted as its controller"
-        )
+    # With esp32_hosted, the co-processor still provides Wi-Fi; esp32_ble then takes the dongle as its
+    # controller instead of the co-processor (see esp32_ble final_validation)
     if sum(1 for c in full.get(DOMAIN) or [] if c[CONF_BLUEDROID]) > 1:
         raise cv.Invalid(f"Only one usb_bluetooth entry can have {CONF_BLUEDROID}")
     return config
