@@ -42,6 +42,12 @@ class USBBluetooth final : public usb_host::USBClient {
   bool hci_send_available() const;
   void hci_attach(const ::esp_bluedroid_hci_driver_callbacks *callbacks);
 #endif
+#ifdef USE_USB_BLUETOOTH_CLASSIC
+  /// Bluedroid runs Classic Bluetooth (BR/EDR) on the dongle as well as LE
+  void set_classic();
+  /// Look for Classic devices for about 13 seconds and log each one found; also done each time Bluetooth starts.
+  void start_classic_discovery();
+#endif
 
   /// Whether a controller is connected and answered the start-up commands.
   bool is_ready() const { return this->step_ == ProbeStep::PROBE_STEP_READY; }
@@ -123,6 +129,11 @@ class USBBluetooth final : public usb_host::USBClient {
   mutable std::atomic<bool> send_blocked_{false};
   // Bluedroid was running on this dongle when it went away: bring esp32_ble back once it is ready again
   bool restart_host_{false};
+#endif
+#ifdef USE_USB_BLUETOOTH_CLASSIC
+  void classic_poll_();
+  // Classic GAP set up for the current run of Bluedroid; cleared when Bluetooth stops
+  bool classic_up_{false};
 #endif
 
   uint32_t fragment_{0};

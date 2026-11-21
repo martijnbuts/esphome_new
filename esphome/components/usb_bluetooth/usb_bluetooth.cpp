@@ -6,11 +6,16 @@
 #include "usb/usb_helpers.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
 #include "esphome/components/esp32_ble/ble.h"
 #include "esp_bluedroid_hci.h"
+#endif
+#ifdef USE_USB_BLUETOOTH_CLASSIC
+#include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"
 #endif
 
 namespace esphome::usb_bluetooth {
@@ -111,7 +116,16 @@ void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
 
 // Commands the controller answers with a Command Status event; it answers all others with Command Complete
 static constexpr uint16_t STATUS_OPCODES[] = {
+    0x0401,  // Inquiry
+    0x0405,  // Create Connection
     0x0406,  // Disconnect
+    0x0409,  // Accept Connection Request
+    0x040A,  // Reject Connection Request
+    0x0411,  // Authentication Requested
+    0x0413,  // Set Connection Encryption
+    0x0419,  // Remote Name Request
+    0x041B,  // Read Remote Supported Features
+    0x041C,  // Read Remote Extended Features
     0x041D,  // Read Remote Version Information
     0x200D,  // LE Create Connection
     0x2013,  // LE Connection Update
@@ -121,6 +135,11 @@ static constexpr uint16_t STATUS_OPCODES[] = {
     0x2026,  // LE Generate DHKey
     0x2032,  // LE Set PHY
     0x2043,  // LE Extended Create Connection
+    0x0428,  // Setup Synchronous Connection
+    0x0429,  // Accept Synchronous Connection Request
+    0x0803,  // Sniff Mode
+    0x0804,  // Exit Sniff Mode
+    0x080B,  // Switch Role
 };
 
 // Bluedroid's HCI task. A Command Complete with status success, or a Command Status with Command Disallowed for
@@ -181,6 +200,29 @@ void USBBluetooth::to_host_(uint8_t *h4, size_t len) {
   const auto *host = this->host_;
   if (host != nullptr && this->host_attached_.load(std::memory_order_acquire))
     host->notify_host_recv(h4, static_cast<uint16_t>(len));
+}
+
+// An ACL packet goes to the dongle in one bulk transfer, whose buffer is USB_MAX_PACKET_SIZE bytes. The controller
+// tells the host how long its ACL packets may be (BR/EDR: up to 1021 bytes for 3-DH5); that length is lowered in
+// the reply before Bluedroid reads it, so Bluedroid cuts its L2CAP data into packets that fit.
+static constexpr uint16_t OP_READ_BUFFER_SIZE = 0x1005;
+static constexpr uint16_t OP_LE_READ_BUFFER_SIZE = 0x2002;
+static constexpr uint16_t OP_LE_READ_BUFFER_SIZE_V2 = 0x2060;
+static constexpr uint16_t ACL_OUT_MAX = usb_host::USB_MAX_PACKET_SIZE - 4;
+
+static void fit_acl_length(uint8_t *event, size_t len) {
+  // Command Complete: code, length, number of packets, opcode, status, then the ACL data length (both commands)
+  if (event[0] != HCI_EVENT_COMMAND_COMPLETE || len < 8 || event[5] != 0)
+    return;
+  const uint16_t opcode = encode_uint16(event[4], event[3]);
+  if (opcode != OP_READ_BUFFER_SIZE && opcode != OP_LE_READ_BUFFER_SIZE && opcode != OP_LE_READ_BUFFER_SIZE_V2)
+    return;
+  const uint16_t acl_len = encode_uint16(event[7], event[6]);
+  if (acl_len <= ACL_OUT_MAX)
+    return;
+  event[6] = static_cast<uint8_t>(ACL_OUT_MAX & 0xFF);
+  event[7] = static_cast<uint8_t>(ACL_OUT_MAX >> 8);
+  ESP_LOGD(TAG, "ACL packets to the dongle limited to %u of %u bytes (opcode 0x%04X)", ACL_OUT_MAX, acl_len, opcode);
 }
 
 // USB task. ACL packets are put back together by their own length field, like events.
@@ -341,6 +383,7 @@ void USBBluetooth::read_event_(uint32_t generation) {
           this->event_len_ = 0;
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
           if (this->host_attached_.load(std::memory_order_acquire)) {
+            fit_acl_length(this->event_, len);
             this->event_h4_[0] = H4_EVENT;
             this->to_host_(this->event_h4_, len + 1);
             this->read_event_(generation);
@@ -557,9 +600,142 @@ void USBBluetooth::finish_probe_(bool ok) {
   this->report_connected_();
 }
 
+#ifdef USE_USB_BLUETOOTH_CLASSIC
+static constexpr uint32_t CLASSIC_POLL_ID = 1;
+static constexpr uint32_t CLASSIC_POLL_MS = 1000;
+// Inquiry length in units of 1.28 s: 10 is 12.8 s, the general inquiry time of the Core specification
+static constexpr uint8_t INQUIRY_LENGTH = 10;
+
+static const LogString *major_class_str(uint32_t major) {
+  switch (major) {
+    case ESP_BT_COD_MAJOR_DEV_COMPUTER:
+      return LOG_STR("computer");
+    case ESP_BT_COD_MAJOR_DEV_PHONE:
+      return LOG_STR("phone");
+    case ESP_BT_COD_MAJOR_DEV_LAN_NAP:
+      return LOG_STR("network");
+    case ESP_BT_COD_MAJOR_DEV_AV:
+      return LOG_STR("audio/video");
+    case ESP_BT_COD_MAJOR_DEV_PERIPHERAL:
+      return LOG_STR("peripheral");
+    case ESP_BT_COD_MAJOR_DEV_IMAGING:
+      return LOG_STR("imaging");
+    case ESP_BT_COD_MAJOR_DEV_WEARABLE:
+      return LOG_STR("wearable");
+    case ESP_BT_COD_MAJOR_DEV_TOY:
+      return LOG_STR("toy");
+    case ESP_BT_COD_MAJOR_DEV_HEALTH:
+      return LOG_STR("health");
+    default:
+      return LOG_STR("other");
+  }
+}
+
+// Bluedroid's BTC task
+static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
+    ESP_LOGI(TAG, "Classic discovery %s",
+             param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED ? LOG_STR_LITERAL("started")
+                                                                      : LOG_STR_LITERAL("finished"));
+    return;
+  }
+  if (event != ESP_BT_GAP_DISC_RES_EVT)
+    return;
+  const auto &res = param->disc_res;
+  uint32_t cod = 0;
+  int rssi = 0;
+  bool has_rssi = false;
+  char name[ESP_BT_GAP_MAX_BDNAME_LEN + 1]{};
+  for (int i = 0; i < res.num_prop; i++) {
+    const esp_bt_gap_dev_prop_t &prop = res.prop[i];
+    switch (prop.type) {
+      case ESP_BT_GAP_DEV_PROP_COD:
+        cod = *static_cast<uint32_t *>(prop.val);
+        break;
+      case ESP_BT_GAP_DEV_PROP_RSSI:
+        rssi = *static_cast<int8_t *>(prop.val);
+        has_rssi = true;
+        break;
+      case ESP_BT_GAP_DEV_PROP_BDNAME:
+        if (name[0] == 0) {
+          const size_t n = std::min<size_t>(prop.len, ESP_BT_GAP_MAX_BDNAME_LEN);
+          memcpy(name, prop.val, n);
+          name[n] = 0;
+        }
+        break;
+      case ESP_BT_GAP_DEV_PROP_EIR:
+        if (name[0] == 0) {
+          uint8_t n = 0;
+          const uint8_t *eir_name =
+              esp_bt_gap_resolve_eir_data(static_cast<uint8_t *>(prop.val), ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &n);
+          if (eir_name == nullptr)
+            eir_name =
+                esp_bt_gap_resolve_eir_data(static_cast<uint8_t *>(prop.val), ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &n);
+          if (eir_name != nullptr) {
+            n = std::min<uint8_t>(n, ESP_BT_GAP_MAX_BDNAME_LEN);
+            memcpy(name, eir_name, n);
+            name[n] = 0;
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  const uint8_t *a = res.bda;
+  ESP_LOGI(TAG, "Classic device %02X:%02X:%02X:%02X:%02X:%02X  %s, class 0x%06" PRIX32 " (%s), RSSI %s%d", a[0], a[1],
+           a[2], a[3], a[4], a[5], name[0] != 0 ? name : LOG_STR_LITERAL("(no name)"), cod,
+           LOG_STR_ARG(major_class_str(esp_bt_gap_get_cod_major_dev(cod))),
+           has_rssi ? LOG_STR_LITERAL("") : LOG_STR_LITERAL("n/a "), rssi);
+}
+
+void USBBluetooth::set_classic() {
+  this->set_interval(CLASSIC_POLL_ID, CLASSIC_POLL_MS, [this]() { this->classic_poll_(); });
+}
+
+// Main loop. Bluedroid forgets the Classic GAP callback when esp32_ble takes it down (dongle unplugged, ble.disable),
+// so it is registered again, and a discovery started, each time esp32_ble becomes active.
+void USBBluetooth::classic_poll_() {
+  const bool active = esp32_ble::global_ble != nullptr && esp32_ble::global_ble->is_active();
+  if (!active) {
+    this->classic_up_ = false;
+    return;
+  }
+  if (this->classic_up_)
+    return;
+  this->classic_up_ = true;
+  esp_err_t err = esp_bt_gap_register_callback(classic_gap_event);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_bt_gap_register_callback failed: %s", esp_err_to_name(err));
+    return;
+  }
+  // Not connectable or discoverable: this device only looks for others for now
+  err = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_bt_gap_set_scan_mode failed: %s", esp_err_to_name(err));
+  }
+  ESP_LOGI(TAG, "Classic Bluetooth ready on the dongle");
+  this->start_classic_discovery();
+}
+
+void USBBluetooth::start_classic_discovery() {
+  if (!this->classic_up_) {
+    ESP_LOGW(TAG, "Classic discovery needs Bluetooth to be running");
+    return;
+  }
+  const esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, INQUIRY_LENGTH, 0);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_bt_gap_start_discovery failed: %s", esp_err_to_name(err));
+  }
+}
+#endif
+
 void USBBluetooth::dump_config() {
   usb_host::USBClient::dump_config();
   ESP_LOGCONFIG(TAG, "  Realtek firmware images: %u", static_cast<unsigned>(this->realtek_images_.size()));
+#ifdef USE_USB_BLUETOOTH_CLASSIC
+  ESP_LOGCONFIG(TAG, "  Classic Bluetooth: YES");
+#endif
 }
 
 }  // namespace esphome::usb_bluetooth

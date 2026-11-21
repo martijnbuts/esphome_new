@@ -34,6 +34,7 @@ AUTO_LOAD = ["usb_host"]
 MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
+CONF_CLASSIC = "classic"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
@@ -83,6 +84,9 @@ CONFIG_SCHEMA = cv.All(
             # The dongle is the controller of ESP-IDF's Bluedroid host, so esp32_ble and everything on top
             # of it (bluetooth_proxy, ble_client, esp32_ble_tracker) runs on the dongle's radio
             cv.Optional(CONF_BLUEDROID, default=False): cv.boolean,
+            # Bluedroid also runs Classic Bluetooth (BR/EDR) on the dongle; for now it logs the Classic
+            # devices it finds
+            cv.Optional(CONF_CLASSIC, default=False): cv.boolean,
         }
     ),
     _validate_firmware,
@@ -116,6 +120,8 @@ def _final_validate(config: ConfigType) -> ConfigType:
 
 
 def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
+    if config[CONF_CLASSIC] and not config[CONF_BLUEDROID]:
+        raise cv.Invalid(f"{CONF_CLASSIC} needs {CONF_BLUEDROID}: true")
     if not config[CONF_BLUEDROID]:
         return config
     full = fv.full_config.get()
@@ -143,6 +149,9 @@ async def to_code(config: ConfigType) -> None:
         # library cannot be serviced from the main loop
         cg.add_define("USE_USB_HOST_LIB_TASK")
         cg.add(var.set_bluedroid())
+        if config[CONF_CLASSIC]:
+            cg.add_define("USE_USB_BLUETOOTH_CLASSIC")
+            cg.add(var.set_classic())
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
         for rom, data in sorted(images.items()):
