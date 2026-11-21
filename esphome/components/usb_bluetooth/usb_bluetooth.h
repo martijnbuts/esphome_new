@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
@@ -58,8 +59,24 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_CLASSIC
   /// Bluedroid runs Classic Bluetooth (BR/EDR) on the dongle as well as LE
   void set_classic();
-  /// Look for Classic devices for about 13 seconds and log each one found; also done each time Bluetooth starts.
+  /// Look for Classic devices for about 13 seconds; each one found is logged and listed by classic_devices().
   void start_classic_discovery();
+  /// The Classic devices the last discovery found, for a text sensor.
+  std::string classic_devices();
+  // Bluedroid's BTC task
+  void classic_found_(const uint8_t *bda, const char *name, uint32_t cod, int rssi);
+  void set_classic_discovering_(bool discovering) { this->classic_discovering_ = discovering; }
+#endif
+#ifdef USE_USB_BLUETOOTH_A2DP
+  /// The A2DP sink (speaker) to connect to and stream to, as a 48-bit address.
+  void set_a2dp_speaker(uint64_t address);
+  /// Play the test tone again (10 s of beeps).
+  void play_test_tone();
+  // A2DP source task: PCM frames for the speaker
+  void a2dp_fill_(int16_t *frames, size_t count);
+  // Bluedroid's BTC task
+  void a2dp_connection_(int state);
+  void a2dp_media_ack_(int cmd, int status);
 #endif
 
   /// Whether a controller is connected and answered the start-up commands.
@@ -146,6 +163,37 @@ class USBBluetooth final : public usb_host::USBClient {
   void classic_poll_();
   // Classic GAP set up for the current run of Bluedroid; cleared when Bluetooth stops
   bool classic_up_{false};
+  struct ClassicDevice {
+    uint8_t bda[6];
+    char name[32];
+    uint32_t cod;
+    int8_t rssi;
+  };
+  static constexpr size_t CLASSIC_FOUND_MAX = 8;
+  Mutex classic_lock_;
+  ClassicDevice classic_found_list_[CLASSIC_FOUND_MAX]{};
+  size_t classic_found_count_{0};
+  std::atomic<bool> classic_discovering_{false};
+#endif
+#ifdef USE_USB_BLUETOOTH_A2DP
+  enum A2dpState : uint8_t {
+    A2DP_IDLE,
+    A2DP_CONNECTING,
+    A2DP_CONNECTED,
+    A2DP_READY,
+    A2DP_STARTING,
+    A2DP_STREAMING,
+    A2DP_SUSPENDING,
+    A2DP_SUSPENDED,
+  };
+  void a2dp_poll_();
+  std::atomic<uint8_t> a2dp_state_{A2DP_IDLE};
+  uint8_t a2dp_peer_[6]{};
+  uint32_t a2dp_last_try_{0};
+  // A2DP source task (and play_test_tone()): position in the tone
+  uint32_t a2dp_sample_{0};
+  float a2dp_phase_{0};
+  bool a2dp_test_tone_{true};
 #endif
 
   uint32_t fragment_{0};

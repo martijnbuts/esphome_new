@@ -15,6 +15,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
     VARIANT_ESP32S31,
+    add_idf_sdkconfig_option,
     only_on_variant,
 )
 from esphome.components.usb_host import (
@@ -43,6 +44,7 @@ MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
 CONF_CLASSIC = "classic"
+CONF_A2DP_SPEAKER = "a2dp_speaker"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
@@ -101,6 +103,8 @@ CONFIG_SCHEMA = cv.All(
             # Bluedroid also runs Classic Bluetooth (BR/EDR) on the dongle; for now it logs the Classic
             # devices it finds
             cv.Optional(CONF_CLASSIC, default=False): cv.boolean,
+            # Experiment: connect to this speaker over A2DP (Classic) and play a test tone
+            cv.Optional(CONF_A2DP_SPEAKER): cv.mac_address,
         }
     ),
     _validate_firmware,
@@ -145,6 +149,8 @@ def _final_validate(config: ConfigType) -> ConfigType:
 def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
     if config[CONF_CLASSIC] and not config[CONF_BLUEDROID]:
         raise cv.Invalid(f"{CONF_CLASSIC} needs {CONF_BLUEDROID}: true")
+    if CONF_A2DP_SPEAKER in config and not config[CONF_CLASSIC]:
+        raise cv.Invalid(f"{CONF_A2DP_SPEAKER} needs {CONF_CLASSIC}: true")
     if not config[CONF_BLUEDROID]:
         return config
     full = fv.full_config.get()
@@ -175,6 +181,10 @@ async def to_code(config: ConfigType) -> None:
         if config[CONF_CLASSIC]:
             cg.add_define("USE_USB_BLUETOOTH_CLASSIC")
             cg.add(var.set_classic())
+            if (speaker := config.get(CONF_A2DP_SPEAKER)) is not None:
+                cg.add_define("USE_USB_BLUETOOTH_A2DP")
+                add_idf_sdkconfig_option("CONFIG_BT_A2DP_ENABLE", True)
+                cg.add(var.set_a2dp_speaker(speaker.as_hex))
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
         cg.add(

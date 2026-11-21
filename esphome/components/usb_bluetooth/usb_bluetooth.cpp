@@ -14,8 +14,13 @@
 #include "esp_bluedroid_hci.h"
 #endif
 #ifdef USE_USB_BLUETOOTH_CLASSIC
+#include "esphome/core/application.h"
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
+#include <cmath>
+#endif
+#ifdef USE_USB_BLUETOOTH_A2DP
+#include "esp_a2dp_api.h"
 #endif
 
 namespace esphome::usb_bluetooth {
@@ -663,6 +668,9 @@ static constexpr uint32_t CLASSIC_POLL_MS = 1000;
 // Inquiry length in units of 1.28 s: 10 is 12.8 s, the general inquiry time of the Core specification
 static constexpr uint8_t INQUIRY_LENGTH = 10;
 
+// Bluedroid's callbacks have no user pointer; one dongle runs Bluedroid
+static USBBluetooth *g_classic = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
 static const LogString *major_class_str(uint32_t major) {
   switch (major) {
     case ESP_BT_COD_MAJOR_DEV_COMPUTER:
@@ -689,19 +697,78 @@ static const LogString *major_class_str(uint32_t major) {
 }
 
 // Bluedroid's BTC task
-static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
-  if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
-    ESP_LOGI(TAG, "Classic discovery %s",
-             param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED ? LOG_STR_LITERAL("started")
-                                                                      : LOG_STR_LITERAL("finished"));
-    return;
+void USBBluetooth::classic_found_(const uint8_t *bda, const char *name, uint32_t cod, int rssi) {
+  LockGuard guard(this->classic_lock_);
+  size_t slot = this->classic_found_count_;
+  for (size_t i = 0; i < this->classic_found_count_; i++) {
+    if (memcmp(this->classic_found_list_[i].bda, bda, 6) == 0)
+      slot = i;
   }
-  if (event != ESP_BT_GAP_DISC_RES_EVT)
+  if (slot == CLASSIC_FOUND_MAX)
     return;
+  auto &dev = this->classic_found_list_[slot];
+  memcpy(dev.bda, bda, 6);
+  dev.cod = cod;
+  dev.rssi = static_cast<int8_t>(rssi);
+  if (name[0] != 0 || slot == this->classic_found_count_)
+    snprintf(dev.name, sizeof(dev.name), "%s", name);
+  if (slot == this->classic_found_count_)
+    this->classic_found_count_++;
+}
+
+std::string USBBluetooth::classic_devices() {
+  LockGuard guard(this->classic_lock_);
+  if (this->classic_found_count_ == 0)
+    return this->classic_discovering_ ? "zoeken..." : "geen";
+  std::string out;
+  for (size_t i = 0; i < this->classic_found_count_; i++) {
+    const auto &d = this->classic_found_list_[i];
+    char line[96];
+    snprintf(line, sizeof(line), "%s%s (%02X:%02X:%02X:%02X:%02X:%02X, %s, %d dBm)", i == 0 ? "" : "; ",
+             d.name[0] != 0 ? d.name : "?", d.bda[0], d.bda[1], d.bda[2], d.bda[3], d.bda[4], d.bda[5],
+             LOG_STR_ARG(major_class_str(esp_bt_gap_get_cod_major_dev(d.cod))), d.rssi);
+    out += line;
+  }
+  return out;
+}
+
+// Bluedroid's BTC task
+static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  switch (event) {
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
+      const bool started = param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED;
+      if (g_classic != nullptr)
+        g_classic->set_classic_discovering_(started);
+      ESP_LOGI(TAG, "Classic discovery %s", started ? LOG_STR_LITERAL("started") : LOG_STR_LITERAL("finished"));
+      return;
+    }
+    case ESP_BT_GAP_DISC_RES_EVT:
+      break;
+    case ESP_BT_GAP_CFM_REQ_EVT:
+      // Secure Simple Pairing, Just Works: a speaker has no display to compare a number on
+      ESP_LOGI(TAG, "Pairing: confirming passkey %06" PRIu32, param->cfm_req.num_val);
+      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+      return;
+    case ESP_BT_GAP_PIN_REQ_EVT: {
+      // Legacy pairing: the usual fixed PIN of speakers and headsets
+      ESP_LOGI(TAG, "Pairing: answering a PIN request with 0000");
+      esp_bt_pin_code_t pin{'0', '0', '0', '0'};
+      esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin);
+      return;
+    }
+    case ESP_BT_GAP_AUTH_CMPL_EVT:
+      if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "Paired with '%s'", reinterpret_cast<const char *>(param->auth_cmpl.device_name));
+      } else {
+        ESP_LOGW(TAG, "Pairing failed, status %d", param->auth_cmpl.stat);
+      }
+      return;
+    default:
+      return;
+  }
   const auto &res = param->disc_res;
   uint32_t cod = 0;
   int rssi = 0;
-  bool has_rssi = false;
   char name[ESP_BT_GAP_MAX_BDNAME_LEN + 1]{};
   for (int i = 0; i < res.num_prop; i++) {
     const esp_bt_gap_dev_prop_t &prop = res.prop[i];
@@ -711,7 +778,6 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
         break;
       case ESP_BT_GAP_DEV_PROP_RSSI:
         rssi = *static_cast<int8_t *>(prop.val);
-        has_rssi = true;
         break;
       case ESP_BT_GAP_DEV_PROP_BDNAME:
         if (name[0] == 0) {
@@ -740,45 +806,214 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
     }
   }
   const uint8_t *a = res.bda;
-  ESP_LOGI(TAG, "Classic device %02X:%02X:%02X:%02X:%02X:%02X  %s, class 0x%06" PRIX32 " (%s), RSSI %s%d", a[0], a[1],
+  ESP_LOGI(TAG, "Classic device %02X:%02X:%02X:%02X:%02X:%02X  %s, class 0x%06" PRIX32 " (%s), RSSI %d", a[0], a[1],
            a[2], a[3], a[4], a[5], name[0] != 0 ? name : LOG_STR_LITERAL("(no name)"), cod,
-           LOG_STR_ARG(major_class_str(esp_bt_gap_get_cod_major_dev(cod))),
-           has_rssi ? LOG_STR_LITERAL("") : LOG_STR_LITERAL("n/a "), rssi);
+           LOG_STR_ARG(major_class_str(esp_bt_gap_get_cod_major_dev(cod))), rssi);
+  if (g_classic != nullptr)
+    g_classic->classic_found_(a, name, cod, rssi);
 }
 
+#ifdef USE_USB_BLUETOOTH_A2DP
+// A test tone: 440 Hz beeps, half a second on and off, for TEST_TONE_MS after the stream starts
+static constexpr uint32_t A2DP_RATE = 44100;
+static constexpr uint32_t TEST_TONE_MS = 10000;
+static constexpr int16_t TEST_TONE_AMPLITUDE = 6000;  // about -15 dBFS
+static constexpr uint32_t A2DP_RETRY_MS = 10000;
+
+// A2DP source task: fill buf with 16-bit stereo PCM at 44.1 kHz. len -1 asks to flush.
+static int32_t a2dp_data(uint8_t *buf, int32_t len) {
+  if (buf == nullptr || len <= 0 || g_classic == nullptr)
+    return 0;
+  g_classic->a2dp_fill_(reinterpret_cast<int16_t *>(buf), static_cast<size_t>(len) / 4);
+  return len;
+}
+
+void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
+  static constexpr float TWO_PI = 6.28318530718f;
+  const uint32_t tone_samples = this->a2dp_test_tone_ ? A2DP_RATE * TEST_TONE_MS / 1000 : 0;
+  for (size_t i = 0; i < count; i++) {
+    const uint32_t n = this->a2dp_sample_++;
+    int16_t v = 0;
+    // On for the first half of every second
+    if (n < tone_samples && (n % A2DP_RATE) < A2DP_RATE / 2) {
+      this->a2dp_phase_ += TWO_PI * 440.0f / A2DP_RATE;
+      if (this->a2dp_phase_ > TWO_PI)
+        this->a2dp_phase_ -= TWO_PI;
+      v = static_cast<int16_t>(TEST_TONE_AMPLITUDE * sinf(this->a2dp_phase_));
+    }
+    frames[2 * i] = v;
+    frames[2 * i + 1] = v;
+  }
+}
+
+// Bluedroid's BTC task: only records what happened, the main loop acts on it
+static void a2dp_event(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+  if (g_classic == nullptr)
+    return;
+  switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT:
+      g_classic->a2dp_connection_(param->conn_stat.state);
+      break;
+    case ESP_A2D_AUDIO_STATE_EVT:
+      ESP_LOGI(TAG, "A2DP audio %s",
+               param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED ? LOG_STR_LITERAL("started")
+                                                                      : LOG_STR_LITERAL("suspended"));
+      break;
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+      g_classic->a2dp_media_ack_(param->media_ctrl_stat.cmd, param->media_ctrl_stat.status);
+      break;
+    case ESP_A2D_PROF_STATE_EVT:
+      ESP_LOGD(TAG, "A2DP profile state %d", param->a2d_prof_stat.init_state);
+      break;
+    default:
+      break;
+  }
+}
+
+void USBBluetooth::a2dp_connection_(int state) {
+  ESP_LOGI(TAG, "A2DP %s",
+           state == ESP_A2D_CONNECTION_STATE_CONNECTED       ? LOG_STR_LITERAL("connected")
+           : state == ESP_A2D_CONNECTION_STATE_CONNECTING    ? LOG_STR_LITERAL("connecting")
+           : state == ESP_A2D_CONNECTION_STATE_DISCONNECTING ? LOG_STR_LITERAL("disconnecting")
+                                                             : LOG_STR_LITERAL("disconnected"));
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+  } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+    this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+  }
+}
+
+void USBBluetooth::a2dp_media_ack_(int cmd, int status) {
+  const bool ok = status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
+  if (cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) {
+    if (ok)
+      this->a2dp_state_.store(A2DP_READY, std::memory_order_release);
+  } else if (cmd == ESP_A2D_MEDIA_CTRL_START) {
+    ESP_LOGI(TAG, "A2DP stream %s", ok ? LOG_STR_LITERAL("started") : LOG_STR_LITERAL("did not start"));
+    this->a2dp_state_.store(ok ? A2DP_STREAMING : A2DP_CONNECTED, std::memory_order_release);
+  } else if (cmd == ESP_A2D_MEDIA_CTRL_SUSPEND && ok) {
+    this->a2dp_state_.store(A2DP_SUSPENDED, std::memory_order_release);
+  }
+}
+
+void USBBluetooth::play_test_tone() {
+  this->a2dp_sample_ = 0;
+  this->a2dp_test_tone_ = true;
+  if (this->a2dp_state_.load(std::memory_order_acquire) == A2DP_SUSPENDED)
+    this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+}
+
+// Main loop
+void USBBluetooth::a2dp_poll_() {
+  const uint32_t now = millis();
+  switch (this->a2dp_state_.load(std::memory_order_acquire)) {
+    case A2DP_IDLE:
+      if (now - this->a2dp_last_try_ < A2DP_RETRY_MS && this->a2dp_last_try_ != 0)
+        return;
+      this->a2dp_last_try_ = now == 0 ? 1 : now;
+      ESP_LOGI(TAG, "A2DP: connecting to %02X:%02X:%02X:%02X:%02X:%02X", this->a2dp_peer_[0], this->a2dp_peer_[1],
+               this->a2dp_peer_[2], this->a2dp_peer_[3], this->a2dp_peer_[4], this->a2dp_peer_[5]);
+      if (esp_a2d_source_connect(this->a2dp_peer_) == ESP_OK)
+        this->a2dp_state_.store(A2DP_CONNECTING, std::memory_order_release);
+      return;
+    case A2DP_CONNECTING:
+      // No answer: start over
+      if (now - this->a2dp_last_try_ > 3 * A2DP_RETRY_MS)
+        this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+      return;
+    case A2DP_CONNECTED:
+      // The remote end is set up for media once this is acknowledged
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      return;
+    case A2DP_READY:
+      this->a2dp_sample_ = 0;
+      this->a2dp_state_.store(A2DP_STARTING, std::memory_order_release);
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+      return;
+    case A2DP_STREAMING:
+      // After the tone, suspend: the connection stays, the speaker goes quiet
+      if (this->a2dp_test_tone_ && this->a2dp_sample_ > A2DP_RATE * (TEST_TONE_MS / 1000 + 1)) {
+        this->a2dp_test_tone_ = false;
+        this->a2dp_state_.store(A2DP_SUSPENDING, std::memory_order_release);
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+void USBBluetooth::set_a2dp_speaker(uint64_t address) {
+  for (int i = 0; i < 6; i++)
+    this->a2dp_peer_[i] = static_cast<uint8_t>(address >> (8 * (5 - i)));
+}
+#endif
+
 void USBBluetooth::set_classic() {
+  g_classic = this;
   this->set_interval(CLASSIC_POLL_ID, CLASSIC_POLL_MS, [this]() { this->classic_poll_(); });
 }
 
-// Main loop. Bluedroid forgets the Classic GAP callback when esp32_ble takes it down (dongle unplugged, ble.disable),
-// so it is registered again, and a discovery started, each time esp32_ble becomes active.
+// Main loop. Bluedroid forgets the Classic callbacks and profiles when esp32_ble takes it down (dongle unplugged,
+// ble.disable), so they are set up again each time esp32_ble becomes active.
 void USBBluetooth::classic_poll_() {
   const bool active = esp32_ble::global_ble != nullptr && esp32_ble::global_ble->is_active();
   if (!active) {
     this->classic_up_ = false;
+#ifdef USE_USB_BLUETOOTH_A2DP
+    this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+#endif
     return;
   }
-  if (this->classic_up_)
+  if (this->classic_up_) {
+#ifdef USE_USB_BLUETOOTH_A2DP
+    this->a2dp_poll_();
+#endif
     return;
+  }
   this->classic_up_ = true;
   esp_err_t err = esp_bt_gap_register_callback(classic_gap_event);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_bt_gap_register_callback failed: %s", esp_err_to_name(err));
     return;
   }
+  esp_bt_gap_set_device_name(App.get_name().c_str());
+  // No display or keyboard: Just Works pairing
+  esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
+  esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
+#ifdef USE_USB_BLUETOOTH_A2DP
+  esp_a2d_register_callback(a2dp_event);
+  esp_a2d_source_register_data_callback(a2dp_data);
+  err = esp_a2d_source_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_a2d_source_init failed: %s", esp_err_to_name(err));
+  }
+  this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+  this->a2dp_last_try_ = 0;
+  this->a2dp_test_tone_ = true;
+  // Connectable, so the speaker can connect back when it is switched on; not discoverable
+  err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+#else
   // Not connectable or discoverable: this device only looks for others for now
   err = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+#endif
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "esp_bt_gap_set_scan_mode failed: %s", esp_err_to_name(err));
   }
   ESP_LOGI(TAG, "Classic Bluetooth ready on the dongle");
+#ifndef USE_USB_BLUETOOTH_A2DP
   this->start_classic_discovery();
+#endif
 }
 
 void USBBluetooth::start_classic_discovery() {
   if (!this->classic_up_) {
     ESP_LOGW(TAG, "Classic discovery needs Bluetooth to be running");
     return;
+  }
+  {
+    LockGuard guard(this->classic_lock_);
+    this->classic_found_count_ = 0;
   }
   const esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, INQUIRY_LENGTH, 0);
   if (err != ESP_OK) {

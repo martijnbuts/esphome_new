@@ -6,6 +6,7 @@ usb_bluetooth:
   - id: usb_bt
     bluedroid: true
     classic: true
+    a2dp_speaker: 4C:72:74:24:C8:05
 
 esp32_ble_tracker:
 
