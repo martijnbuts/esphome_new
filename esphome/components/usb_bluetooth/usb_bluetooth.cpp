@@ -91,8 +91,9 @@ void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
   }
   bool sent = false;
   auto done = [this](const usb_host::TransferStatus &status) {
-    if (!status.success)
+    if (!status.success) {
       ESP_LOGW(TAG, "Send to the dongle failed (status %u)", status.error_code);
+    }
     this->send_done_();
   };
   if (h4[0] == H4_COMMAND) {
@@ -164,8 +165,9 @@ bool USBBluetooth::hci_send_available() const {
 void USBBluetooth::hci_attach(const esp_bluedroid_hci_driver_callbacks_t *callbacks) {
   this->host_ = callbacks;
   this->host_attached_.store(callbacks != nullptr, std::memory_order_release);
-  if (callbacks != nullptr)
+  if (callbacks != nullptr) {
     ESP_LOGI(TAG, "Bluedroid attached to the dongle");
+  }
 }
 
 // USB task
@@ -207,8 +209,9 @@ void USBBluetooth::read_acl_(uint32_t generation) {
         this->read_acl_(generation);
       },
       this->acl_in_mps_);
-  if (!submitted)
+  if (!submitted) {
     ESP_LOGE(TAG, "ACL read not submitted");
+  }
 }
 #endif
 
@@ -358,8 +361,9 @@ void USBBluetooth::read_event_(uint32_t generation) {
         this->read_event_(generation);
       },
       this->evt_mps_);
-  if (!submitted)
+  if (!submitted) {
     ESP_LOGE(TAG, "Event read not submitted");
+  }
 }
 
 void USBBluetooth::send_command_(uint16_t opcode, const uint8_t *params, size_t len) {
@@ -373,8 +377,9 @@ void USBBluetooth::send_command_(uint16_t opcode, const uint8_t *params, size_t 
   const bool sent = this->control_transfer(
       HCI_COMMAND_REQUEST_TYPE, 0, 0, this->intf_,
       [opcode](const usb_host::TransferStatus &status) {
-        if (!status.success)
+        if (!status.success) {
           ESP_LOGW(TAG, "HCI command 0x%04X not taken (status %u)", opcode, status.error_code);
+        }
       },
       command);
   if (!sent) {

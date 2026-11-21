@@ -1,7 +1,7 @@
 """A USB Bluetooth dongle (HCI over USB) as a usb_host client."""
 
 import esphome.codegen as cg
-from esphome.components.const import CONF_MANUFACTURER
+from esphome.components.const import CONF_FIRMWARE, CONF_MANUFACTURER
 from esphome.components.esp32 import (
     VARIANT_ESP32H4,
     VARIANT_ESP32P4,
@@ -34,7 +34,6 @@ AUTO_LOAD = ["usb_host"]
 MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
-CONF_FIRMWARE = "firmware"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
