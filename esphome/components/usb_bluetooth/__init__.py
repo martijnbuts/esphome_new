@@ -140,6 +140,9 @@ async def to_code(config: ConfigType) -> None:
     var = await register_usb_client(config)
     if config[CONF_BLUEDROID]:
         cg.add_define("USE_USB_BLUETOOTH_BLUEDROID")
+        # esp_bluedroid_enable() holds the main loop until the dongle answers its commands, so the USB
+        # library cannot be serviced from the main loop
+        cg.add_define("USE_USB_HOST_LIB_TASK")
         cg.add(var.set_bluedroid())
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
