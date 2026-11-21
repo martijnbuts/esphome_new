@@ -668,7 +668,7 @@ async def to_code(config: ConfigType) -> None:
         )
 
     cg.add_define("USE_ESP32_BLE")
-    if _uses_usb_bluetooth(fv.full_config.get()):
+    if _uses_usb_bluetooth(CORE.config):
         cg.add_define("USE_ESP32_BLE_USB_HCI")
 
     if config[CONF_ADVERTISING]:
