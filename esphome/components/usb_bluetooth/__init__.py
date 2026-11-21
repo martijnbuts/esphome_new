@@ -19,16 +19,17 @@ from esphome.components.esp32 import (
 )
 from esphome.components.usb_host import (
     CONF_INTERFACE_DESCRIPTION,
+    CONF_MAX_TRANSFER_REQUESTS,
     CONF_PID,
     CONF_PRODUCT,
     CONF_VID,
     USBClient,
     get_max_packet_size,
     register_usb_client,
+    validate_usb_clients,
 )
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
-from esphome.core import ID
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -47,9 +48,15 @@ CONF_FIRMWARE_CONFIG = "firmware_config"
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
 # transfer behind the 8 byte setup packet: more than the 256 byte transfer buffers hold.
 FIRMWARE_MIN_PACKET_SIZE = 512
+# The event read stays queued all the time, next to the command being sent and a spare one
+MIN_TRANSFER_REQUESTS = 3
+# With Bluedroid an ACL read is queued too, and three slots are kept free for Bluedroid's sends
+# (RESERVED_SLOTS in usb_bluetooth.cpp), with room for ACL data in flight
+MIN_TRANSFER_REQUESTS_BLUEDROID = 8
 
 usb_bluetooth_ns = cg.esphome_ns.namespace("usb_bluetooth")
 USBBluetooth = usb_bluetooth_ns.class_("USBBluetooth", USBClient)
+RealtekImage = USBBluetooth.class_("RealtekImage")
 
 
 def _read_firmware(config: ConfigType) -> tuple[dict[int, bytes], int]:
@@ -115,13 +122,22 @@ def _final_validate(config: ConfigType) -> ConfigType:
             f"Downloading Realtek firmware sends HCI commands of 256 bytes in one control "
             f"transfer: set usb_host max_packet_size to {FIRMWARE_MIN_PACKET_SIZE} or more"
         )
-    instances = fv.full_config.get().get(DOMAIN) or []
-    if config[CONF_VID] == 0 and any(
-        c is not config and c[CONF_VID] == 0 for c in instances
-    ):
+    full = fv.full_config.get()
+    instances = full.get(DOMAIN) or []
+    # Checked once, for the first entry: two entries that could match the same device would race for it.
+    # Other usb_host clients may match the same device: this client only takes a device's Bluetooth
+    # controller interface and leaves devices without one alone.
+    if instances and config is instances[0]:
+        validate_usb_clients(instances)
+    usb_host_config = full.get("usb_host") or {}
+    needed = (
+        MIN_TRANSFER_REQUESTS_BLUEDROID
+        if config.get(CONF_BLUEDROID)
+        else MIN_TRANSFER_REQUESTS
+    )
+    if usb_host_config.get(CONF_MAX_TRANSFER_REQUESTS, needed) < needed:
         raise cv.Invalid(
-            "Several usb_bluetooth entries without vid/pid would race for the same dongle: "
-            "give each one a vid and pid"
+            f"usb_bluetooth needs usb_host {CONF_MAX_TRANSFER_REQUESTS} of {needed} or more"
         )
     return config
 
@@ -161,13 +177,14 @@ async def to_code(config: ConfigType) -> None:
             cg.add(var.set_classic())
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
+        cg.add(
+            var.set_realtek_firmware_storage(
+                cg.static_storage(config[CONF_ID], RealtekImage, len(images))
+            )
+        )
         for rom, data in sorted(images.items()):
-            arr = cg.progmem_array(
-                ID(
-                    f"{config[CONF_ID].id}_rtl_rom{rom}",
-                    is_declaration=True,
-                    type=cg.uint8,
-                ),
-                list(data),
+            # Identical firmware in several entries is stored once
+            arr = cg.shared_progmem_array(
+                f"{config[CONF_ID].id}_rtl_rom{rom}", cg.uint8, list(data)
             )
             cg.add(var.add_realtek_firmware(lmp_subver, rom, arr, len(data)))
