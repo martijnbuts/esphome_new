@@ -21,6 +21,7 @@
 #endif
 #ifdef USE_USB_BLUETOOTH_A2DP
 #include "esp_a2dp_api.h"
+#include "esp_avrc_api.h"
 #endif
 
 namespace esphome::usb_bluetooth {
@@ -817,7 +818,12 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
 // A test tone: 440 Hz beeps, half a second on and off, for TEST_TONE_MS after the stream starts
 static constexpr uint32_t A2DP_RATE = 44100;
 static constexpr uint32_t TEST_TONE_MS = 10000;
-static constexpr int16_t TEST_TONE_AMPLITUDE = 6000;  // about -15 dBFS
+static constexpr int16_t TEST_TONE_AMPLITUDE = 3300;  // about -20 dBFS
+// AVRCP transaction labels, one per kind of command
+static constexpr uint8_t TL_CAPS = 0;
+static constexpr uint8_t TL_VOLUME_NOTIFY = 1;
+static constexpr uint8_t TL_SET_VOLUME = 2;
+static constexpr uint8_t AVRC_VOLUME_MAX = 0x7F;
 static constexpr uint32_t A2DP_RETRY_MS = 10000;
 
 // A2DP source task: fill buf with 16-bit stereo PCM at 44.1 kHz. len -1 asks to flush.
@@ -839,7 +845,7 @@ void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
       this->a2dp_phase_ += TWO_PI * 440.0f / A2DP_RATE;
       if (this->a2dp_phase_ > TWO_PI)
         this->a2dp_phase_ -= TWO_PI;
-      v = static_cast<int16_t>(TEST_TONE_AMPLITUDE * sinf(this->a2dp_phase_));
+      v = static_cast<int16_t>(TEST_TONE_AMPLITUDE * this->a2dp_gain_ * sinf(this->a2dp_phase_));
     }
     frames[2 * i] = v;
     frames[2 * i + 1] = v;
@@ -896,6 +902,95 @@ void USBBluetooth::a2dp_media_ack_(int cmd, int status) {
   }
 }
 
+// Bluedroid's BTC task
+static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param) {
+  if (g_classic == nullptr)
+    return;
+  switch (event) {
+    case ESP_AVRC_CT_CONNECTION_STATE_EVT:
+      ESP_LOGI(TAG, "AVRCP %s",
+               param->conn_stat.connected ? LOG_STR_LITERAL("connected") : LOG_STR_LITERAL("disconnected"));
+      g_classic->avrc_connected_(param->conn_stat.connected);
+      if (param->conn_stat.connected)
+        esp_avrc_ct_send_get_rn_capabilities_cmd(TL_CAPS);
+      break;
+    case ESP_AVRC_CT_GET_RN_CAPABILITIES_RSP_EVT: {
+      const bool volume = esp_avrc_rn_evt_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_TEST, &param->get_rn_caps_rsp.evt_set,
+                                                             ESP_AVRC_RN_VOLUME_CHANGE);
+      ESP_LOGI(TAG, "Speaker %s absolute volume", volume ? LOG_STR_LITERAL("supports") : LOG_STR_LITERAL("lacks"));
+      g_classic->avrc_absolute_volume_(volume);
+      if (volume)
+        esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
+      break;
+    }
+    case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
+      if (param->change_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
+        g_classic->avrc_volume_reported_(param->change_ntf.event_parameter.volume);
+        // A notification is sent once per registration
+        esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
+      }
+      break;
+    case ESP_AVRC_CT_SET_ABSOLUTE_VOLUME_RSP_EVT:
+      g_classic->avrc_volume_reported_(param->set_volume_rsp.volume);
+      break;
+    default:
+      break;
+  }
+}
+
+// Bluedroid's BTC task. The speaker's buttons (play/pause and the like) arrive here.
+static void avrc_tg_event(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
+  if (event == ESP_AVRC_TG_PASSTHROUGH_CMD_EVT) {
+    ESP_LOGI(TAG, "Speaker button: key 0x%02X %s", param->psth_cmd.key_code,
+             param->psth_cmd.key_state == ESP_AVRC_PT_CMD_STATE_PRESSED ? LOG_STR_LITERAL("pressed")
+                                                                        : LOG_STR_LITERAL("released"));
+  }
+}
+
+void USBBluetooth::avrc_connected_(bool connected) {
+  this->avrc_connected_flag_.store(connected, std::memory_order_release);
+  if (!connected) {
+    this->avrc_abs_volume_.store(false, std::memory_order_release);
+    this->speaker_volume_.store(-1, std::memory_order_release);
+  }
+}
+
+void USBBluetooth::avrc_absolute_volume_(bool supported) {
+  this->avrc_abs_volume_.store(supported, std::memory_order_release);
+  // With absolute volume the speaker sets the level; otherwise the samples are scaled
+  this->a2dp_gain_ = supported ? 1.0f : this->volume_;
+  if (supported) {
+    // Before anything plays, set the speaker to the configured level
+    const uint8_t vol = static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX));
+    ESP_LOGI(TAG, "Setting the speaker volume to %u%%", static_cast<unsigned>(lroundf(this->volume_ * 100)));
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME, vol);
+  }
+}
+
+void USBBluetooth::avrc_volume_reported_(uint8_t volume) {
+  this->speaker_volume_.store(volume, std::memory_order_release);
+  ESP_LOGI(TAG, "Speaker volume %u%% (%u of 127)", static_cast<unsigned>((volume * 100 + 63) / 127),
+           static_cast<unsigned>(volume));
+}
+
+void USBBluetooth::set_volume(float level) {
+  this->volume_ = std::clamp(level, 0.0f, 1.0f);
+  if (this->avrc_abs_volume_.load(std::memory_order_acquire)) {
+    this->a2dp_gain_ = 1.0f;
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME,
+                                             static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX)));
+  } else {
+    this->a2dp_gain_ = this->volume_;
+  }
+}
+
+float USBBluetooth::speaker_volume() const {
+  const int v = this->speaker_volume_.load(std::memory_order_acquire);
+  if (v < 0)
+    return this->avrc_abs_volume_.load(std::memory_order_acquire) ? NAN : this->volume_ * 100.0f;
+  return v * 100.0f / AVRC_VOLUME_MAX;
+}
+
 void USBBluetooth::play_test_tone() {
   this->a2dp_sample_ = 0;
   this->a2dp_test_tone_ = true;
@@ -922,8 +1017,9 @@ void USBBluetooth::a2dp_poll_() {
         this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
       return;
     case A2DP_CONNECTED:
-      // The remote end is set up for media once this is acknowledged
-      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      // Only stream when there is something to play; the remote end is set up for media once this is acknowledged
+      if (this->a2dp_test_tone_)
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
       return;
     case A2DP_READY:
       this->a2dp_sample_ = 0;
@@ -982,6 +1078,11 @@ void USBBluetooth::classic_poll_() {
   esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
   esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
 #ifdef USE_USB_BLUETOOTH_A2DP
+  // AVRCP: the speaker's volume (absolute volume, AVRCP 1.4). Initialised before A2DP, as in the ESP-IDF example.
+  esp_avrc_ct_register_callback(avrc_ct_event);
+  esp_avrc_ct_init();
+  esp_avrc_tg_register_callback(avrc_tg_event);
+  esp_avrc_tg_init();
   esp_a2d_register_callback(a2dp_event);
   esp_a2d_source_register_data_callback(a2dp_data);
   err = esp_a2d_source_init();
@@ -990,7 +1091,8 @@ void USBBluetooth::classic_poll_() {
   }
   this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
   this->a2dp_last_try_ = 0;
-  this->a2dp_test_tone_ = true;
+  // The tone plays when asked for (button), after the volume has been set
+  this->a2dp_test_tone_ = false;
   // Connectable, so the speaker can connect back when it is switched on; not discoverable
   err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
 #else

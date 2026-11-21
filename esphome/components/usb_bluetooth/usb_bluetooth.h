@@ -70,8 +70,16 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_A2DP
   /// The A2DP sink (speaker) to connect to and stream to, as a 48-bit address.
   void set_a2dp_speaker(uint64_t address);
-  /// Play the test tone again (10 s of beeps).
+  /// Play the test tone (10 s of beeps).
   void play_test_tone();
+  /// The speaker volume, 0..1: sent to the speaker over AVRCP (absolute volume), or applied to the samples.
+  void set_volume(float level);
+  /// The volume the speaker reports, in percent; NAN while unknown.
+  float speaker_volume() const;
+  // Bluedroid's BTC task (AVRCP)
+  void avrc_connected_(bool connected);
+  void avrc_absolute_volume_(bool supported);
+  void avrc_volume_reported_(uint8_t volume);
   // A2DP source task: PCM frames for the speaker
   void a2dp_fill_(int16_t *frames, size_t count);
   // Bluedroid's BTC task
@@ -193,7 +201,13 @@ class USBBluetooth final : public usb_host::USBClient {
   // A2DP source task (and play_test_tone()): position in the tone
   uint32_t a2dp_sample_{0};
   float a2dp_phase_{0};
-  bool a2dp_test_tone_{true};
+  bool a2dp_test_tone_{false};
+  // Speaker volume: the level asked for, the gain on the samples, and what the speaker reports (-1: unknown)
+  float volume_{0.3f};
+  float a2dp_gain_{0.3f};
+  std::atomic<int> speaker_volume_{-1};
+  std::atomic<bool> avrc_connected_flag_{false};
+  std::atomic<bool> avrc_abs_volume_{false};
 #endif
 
   uint32_t fragment_{0};
