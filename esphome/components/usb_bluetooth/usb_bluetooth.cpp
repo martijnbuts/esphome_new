@@ -749,6 +749,10 @@ static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p
       esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin);
       break;
     }
+    case ESP_BT_GAP_READ_REMOTE_NAME_EVT:
+      if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS && g_a2dp != nullptr)
+        g_a2dp->speaker_name_(param->read_rmt_name.bda, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name));
+      break;
     case ESP_BT_GAP_AUTH_CMPL_EVT:
       if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "Paired with '%s'", reinterpret_cast<const char *>(param->auth_cmpl.device_name));
@@ -794,21 +798,60 @@ static void a2dp_event(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
   if (g_a2dp == nullptr)
     return;
   if (event == ESP_A2D_CONNECTION_STATE_EVT) {
-    g_a2dp->a2dp_connection_(param->conn_stat.state);
+    g_a2dp->a2dp_connection_(param->conn_stat.state, param->conn_stat.remote_bda);
   } else if (event == ESP_A2D_MEDIA_CTRL_ACK_EVT) {
     g_a2dp->a2dp_media_ack_(param->media_ctrl_stat.cmd, param->media_ctrl_stat.status);
   }
 }
 
-void USBBluetooth::a2dp_connection_(int state) {
+void USBBluetooth::a2dp_connection_(int state, const uint8_t *address) {
   if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-    ESP_LOGI(TAG, "Speaker connected");
+    ESP_LOGI(TAG, "Speaker %02X:%02X:%02X:%02X:%02X:%02X connected", address[0], address[1], address[2], address[3],
+             address[4], address[5]);
     this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+    this->speaker_name_(address, "");
+    // The name arrives as ESP_BT_GAP_READ_REMOTE_NAME_EVT
+    esp_bt_gap_read_remote_name(const_cast<uint8_t *>(address));
   } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
     ESP_LOGI(TAG, "Speaker disconnected");
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+#ifdef USE_TEXT_SENSOR
+    this->speaker_changed_.store(true, std::memory_order_release);
+#endif
   }
 }
+
+// Bluedroid's BTC task
+void USBBluetooth::speaker_name_(const uint8_t *address, const char *name) {
+  if (name[0] != 0) {
+    ESP_LOGI(TAG, "Speaker name: '%s'", name);
+  }
+#ifdef USE_TEXT_SENSOR
+  {
+    LockGuard guard(this->speaker_lock_);
+    memcpy(this->speaker_address_, address, sizeof(this->speaker_address_));
+    snprintf(this->speaker_name_buf_, sizeof(this->speaker_name_buf_), "%s", name);
+  }
+  this->speaker_changed_.store(true, std::memory_order_release);
+#endif
+}
+
+#ifdef USE_TEXT_SENSOR
+// Main loop: the name and address of the connected speaker, or empty while none is connected
+void USBBluetooth::publish_connected_speaker_() {
+  if (this->connected_speaker_text_sensor_ == nullptr || !this->speaker_changed_.exchange(false))
+    return;
+  char text[sizeof(this->speaker_name_buf_) + 24] = "";
+  if (this->a2dp_connected()) {
+    LockGuard guard(this->speaker_lock_);
+    const uint8_t *a = this->speaker_address_;
+    snprintf(text, sizeof(text), "%s%s%02X:%02X:%02X:%02X:%02X:%02X%s", this->speaker_name_buf_,
+             this->speaker_name_buf_[0] != 0 ? " (" : "", a[0], a[1], a[2], a[3], a[4], a[5],
+             this->speaker_name_buf_[0] != 0 ? ")" : "");
+  }
+  this->connected_speaker_text_sensor_->publish_state(text);
+}
+#endif
 
 void USBBluetooth::a2dp_media_ack_(int cmd, int status) {
   const bool ok = status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
@@ -920,7 +963,15 @@ bool USBBluetooth::a2dp_setup_() {
 
 // Main loop
 void USBBluetooth::a2dp_poll_() {
+#ifdef USE_TEXT_SENSOR
+  this->publish_connected_speaker_();
+#endif
   if (esp32_ble::global_ble == nullptr || !esp32_ble::global_ble->is_active()) {
+#ifdef USE_TEXT_SENSOR
+    // Bluetooth stopped (dongle unplugged): no disconnect event follows
+    if (this->a2dp_state_.load(std::memory_order_acquire) != A2DP_IDLE)
+      this->speaker_changed_.store(true, std::memory_order_release);
+#endif
     this->a2dp_up_ = false;
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
     return;

@@ -55,3 +55,18 @@ def test_bluedroid_alone_leaves_classic_off(
         CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]["CONFIG_BT_CLASSIC_ENABLED"]
         is False
     )
+
+
+def test_connected_speaker_text_sensor(
+    tmp_path: Path, generate_main: Callable[[str | Path], str]
+) -> None:
+    main = generate_main(
+        _write(
+            tmp_path,
+            "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n"
+            "    a2dp_speaker: 4C:72:74:24:C8:05\n\n"
+            "text_sensor:\n  - platform: usb_bluetooth\n"
+            "    connected_speaker:\n      name: Connected speaker\n",
+        )
+    )
+    assert "bt->set_connected_speaker_text_sensor(" in main

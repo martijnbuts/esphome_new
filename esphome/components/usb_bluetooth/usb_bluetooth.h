@@ -12,6 +12,9 @@
 #include <span>
 #include <vector>
 
+#if defined(USE_USB_BLUETOOTH_A2DP) && defined(USE_TEXT_SENSOR)
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
 struct esp_bluedroid_hci_driver_callbacks;
 #endif
@@ -88,8 +91,12 @@ class USBBluetooth final : public usb_host::USBClient {
   // A2DP source task: PCM frames for the speaker
   void a2dp_fill_(int16_t *frames, size_t count);
   // Bluedroid's BTC task
-  void a2dp_connection_(int state);
+  void a2dp_connection_(int state, const uint8_t *address);
   void a2dp_media_ack_(int cmd, int status);
+  void speaker_name_(const uint8_t *address, const char *name);
+#ifdef USE_TEXT_SENSOR
+  SUB_TEXT_SENSOR(connected_speaker)
+#endif
 #endif
 
   /// Whether a controller is connected and answered the start-up commands.
@@ -193,6 +200,15 @@ class USBBluetooth final : public usb_host::USBClient {
   float a2dp_gain_{1.0f};
   std::atomic<bool> avrc_abs_volume_{false};
   std::atomic<bool> a2dp_mute_{false};
+#ifdef USE_TEXT_SENSOR
+  void publish_connected_speaker_();
+  // The connected speaker, written by Bluedroid's BTC task and published from the main loop
+  Mutex speaker_lock_;
+  char speaker_name_buf_[64]{};
+  uint8_t speaker_address_[6]{};
+  // Starts set, so the sensor gets a state at boot
+  std::atomic<bool> speaker_changed_{true};
+#endif
 #ifdef USE_USB_BLUETOOTH_SPEAKER
   USBBluetoothSpeaker *a2dp_source_{nullptr};
 #endif

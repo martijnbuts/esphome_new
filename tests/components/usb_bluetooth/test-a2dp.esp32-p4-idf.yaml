@@ -12,3 +12,8 @@ esp32_ble_tracker:
 speaker:
   - platform: usb_bluetooth
     id: bt_speaker
+
+text_sensor:
+  - platform: usb_bluetooth
+    connected_speaker:
+      name: Connected speaker
