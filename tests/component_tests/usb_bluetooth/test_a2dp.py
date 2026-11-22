@@ -3,7 +3,10 @@
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from esphome.components.esp32.const import KEY_ESP32, KEY_SDKCONFIG_OPTIONS
+from esphome.config import read_config
 from esphome.core import CORE
 
 BASE = (
@@ -70,3 +73,34 @@ def test_connected_speaker_text_sensor(
         )
     )
     assert "bt->set_connected_speaker_text_sensor(" in main
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        pytest.param(
+            "usb_bluetooth:\n  - id: bt\n    a2dp_speaker: 4C:72:74:24:C8:05\n",
+            "a2dp_speaker needs bluedroid: true",
+            id="speaker_needs_bluedroid",
+        ),
+        pytest.param(
+            "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n\n"
+            "speaker:\n  - platform: usb_bluetooth\n    id: bt_speaker\n",
+            "The usb_bluetooth entry 'bt' needs a2dp_speaker",
+            id="speaker_platform_needs_a2dp_speaker",
+        ),
+        pytest.param(
+            "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n\n"
+            "text_sensor:\n  - platform: usb_bluetooth\n"
+            "    connected_speaker:\n      name: Connected speaker\n",
+            "connected_speaker needs a2dp_speaker on the usb_bluetooth entry 'bt'",
+            id="text_sensor_needs_a2dp_speaker",
+        ),
+    ],
+)
+def test_a2dp_rejects(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str, message: str
+) -> None:
+    CORE.config_path = _write(tmp_path, text)
+    assert read_config({}) is None
+    assert message in capsys.readouterr().out
