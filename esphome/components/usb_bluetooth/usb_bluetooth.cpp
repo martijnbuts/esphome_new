@@ -6,6 +6,7 @@
 #include "usb/usb_helpers.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
@@ -910,6 +911,10 @@ static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *
   if (g_a2dp == nullptr)
     return;
   switch (event) {
+    case ESP_AVRC_CT_REMOTE_FEATURES_EVT:
+      ESP_LOGD(TAG, "Speaker AVRCP features 0x%08" PRIX32 ", target flags 0x%04X", param->rmt_feats.feat_mask,
+               param->rmt_feats.tg_feat_flag);
+      break;
     case ESP_AVRC_CT_CONNECTION_STATE_EVT:
       g_a2dp->avrc_connected_(param->conn_stat.connected);
       if (param->conn_stat.connected)
@@ -937,15 +942,32 @@ static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *
 static void avrc_tg_event(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
   if (g_a2dp == nullptr)
     return;
-  if (event == ESP_AVRC_TG_PASSTHROUGH_CMD_EVT && param->psth_cmd.key_state == ESP_AVRC_PT_CMD_STATE_PRESSED) {
-    g_a2dp->speaker_button_(param->psth_cmd.key_code);
+  switch (event) {
+    case ESP_AVRC_TG_CONNECTION_STATE_EVT:
+      ESP_LOGD(TAG, "AVRCP target %s",
+               param->conn_stat.connected ? LOG_STR_LITERAL("connected") : LOG_STR_LITERAL("disconnected"));
+      break;
+    case ESP_AVRC_TG_REMOTE_FEATURES_EVT:
+      // Whether the speaker can send buttons: its AVRCP controller features
+      ESP_LOGD(TAG, "Speaker AVRCP features 0x%08" PRIX32 ", controller flags 0x%04X", param->rmt_feats.feat_mask,
+               param->rmt_feats.ct_feat_flag);
+      break;
+    case ESP_AVRC_TG_PASSTHROUGH_CMD_EVT:
+      ESP_LOGD(TAG, "Speaker key 0x%02X %s", param->psth_cmd.key_code,
+               param->psth_cmd.key_state == ESP_AVRC_PT_CMD_STATE_PRESSED ? LOG_STR_LITERAL("pressed")
+                                                                          : LOG_STR_LITERAL("released"));
+      if (param->psth_cmd.key_state == ESP_AVRC_PT_CMD_STATE_PRESSED)
+        g_a2dp->speaker_button_(param->psth_cmd.key_code);
+      break;
+    default:
+      ESP_LOGV(TAG, "AVRCP target event %d", event);
+      break;
   }
 }
 
 void USBBluetooth::speaker_button_(uint8_t key_code) {
   const SpeakerButton button = speaker_button(key_code);
   if (button == SpeakerButton::SPEAKER_BUTTON_NONE) {
-    ESP_LOGD(TAG, "Speaker button 0x%02X not handled", key_code);
     return;
   }
   this->buttons_pressed_.fetch_or(1 << static_cast<uint8_t>(button), std::memory_order_acq_rel);
@@ -975,7 +997,6 @@ bool USBBluetooth::process_speaker_reports_() {
     if ((pressed & (1 << i)) == 0)
       continue;
     work = true;
-    ESP_LOGD(TAG, "Speaker button: %s", SPEAKER_BUTTON_NAMES[i]);
     if (this->speaker_buttons_event_ != nullptr)
       this->speaker_buttons_event_->trigger(SPEAKER_BUTTON_NAMES[i]);
   }
@@ -1102,10 +1123,15 @@ bool USBBluetooth::a2dp_setup_() {
 #ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
   // The target side receives the speaker's buttons; every pass-through command Bluedroid allows is accepted
   esp_avrc_tg_register_callback(avrc_tg_event);
-  esp_avrc_tg_init();
+  err = esp_avrc_tg_init();
   esp_avrc_psth_bit_mask_t commands{};
-  esp_avrc_tg_get_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_ALLOWED_CMD, &commands);
-  esp_avrc_tg_set_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_SUPPORTED_CMD, &commands);
+  if (err == ESP_OK)
+    err = esp_avrc_tg_get_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_ALLOWED_CMD, &commands);
+  if (err == ESP_OK)
+    err = esp_avrc_tg_set_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_SUPPORTED_CMD, &commands);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "AVRCP target not set up, the speaker's buttons are not received: %s", esp_err_to_name(err));
+  }
 #endif
   esp_a2d_register_callback(a2dp_event);
   esp_a2d_source_register_data_callback(a2dp_data);
