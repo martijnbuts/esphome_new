@@ -20,6 +20,8 @@ class USBBluetoothSpeakerSelect final : public select::Select, public Component,
   void dump_config() override;
   /// Main loop: rebuild the options after a search found a device, started or ended.
   void update_options();
+  /// Main loop: take the name the current speaker reports when it connects, which a2dp_speaker does not give.
+  void connected_speaker_changed();
 
  protected:
   void control(size_t index) override;

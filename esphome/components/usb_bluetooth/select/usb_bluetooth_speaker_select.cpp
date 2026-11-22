@@ -55,6 +55,20 @@ void USBBluetoothSpeakerSelect::update_options() {
   this->publish_state(this->parent_->scanning() ? count - 1 : 0);
 }
 
+void USBBluetoothSpeakerSelect::connected_speaker_changed() {
+  uint8_t address[6];
+  char name[sizeof(this->current_.name)];
+  if (!this->parent_->connected_speaker(address, name, sizeof(name)) || name[0] == 0 ||
+      memcmp(address, this->current_.address, sizeof(address)) != 0 ||
+      strncmp(name, this->current_.name, sizeof(name)) == 0)
+    return;
+  memcpy(this->current_.name, name, sizeof(name));
+  if (!this->pref_.save(&this->current_)) {
+    ESP_LOGW(TAG, "Could not store the speaker name");
+  }
+  this->update_options();
+}
+
 void USBBluetoothSpeakerSelect::control(size_t index) {
   if (index >= this->option_count_)
     return;

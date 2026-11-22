@@ -81,6 +81,8 @@ class USBBluetooth final : public usb_host::USBClient {
   void scan_speakers();
   /// Whether a search for speakers is running.
   bool scanning() const { return this->scanning_.load(std::memory_order_acquire); }
+  /// Copy the address and name (empty until it is read) of the connected speaker; false while none is connected.
+  bool connected_speaker(uint8_t *address, char *name, size_t size);
   /// Copy the devices found by the last search into out, MAX_FOUND_SPEAKERS entries; returns how many.
   uint8_t found_speakers(FoundSpeaker *out);
 #ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
@@ -216,13 +218,13 @@ class USBBluetooth final : public usb_host::USBClient {
   std::atomic<bool> a2dp_mute_{false};
 #ifdef USE_TEXT_SENSOR
   void publish_connected_speaker_();
-  // The connected speaker, written by Bluedroid's BTC task and published from the main loop
+#endif
+  // The connected speaker, written by Bluedroid's BTC task and handed on from the main loop
   Mutex speaker_lock_;
   char speaker_name_buf_[64]{};
   uint8_t speaker_address_[6]{};
   // Starts set, so the sensor gets a state at boot
   std::atomic<bool> speaker_changed_{true};
-#endif
 #ifdef USE_USB_BLUETOOTH_SPEAKER
   USBBluetoothSpeaker *a2dp_source_{nullptr};
 #endif

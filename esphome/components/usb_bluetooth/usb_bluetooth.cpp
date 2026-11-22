@@ -846,9 +846,7 @@ void USBBluetooth::a2dp_connection_(int state, const uint8_t *address) {
   } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
     ESP_LOGI(TAG, "Speaker disconnected");
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
-#ifdef USE_TEXT_SENSOR
     this->speaker_changed_.store(true, std::memory_order_release);
-#endif
   }
 }
 
@@ -857,26 +855,33 @@ void USBBluetooth::speaker_name_(const uint8_t *address, const char *name) {
   if (name[0] != 0) {
     ESP_LOGI(TAG, "Speaker name: '%s'", name);
   }
-#ifdef USE_TEXT_SENSOR
   {
     LockGuard guard(this->speaker_lock_);
     memcpy(this->speaker_address_, address, sizeof(this->speaker_address_));
     snprintf(this->speaker_name_buf_, sizeof(this->speaker_name_buf_), "%s", name);
   }
   this->speaker_changed_.store(true, std::memory_order_release);
-#endif
+}
+
+bool USBBluetooth::connected_speaker(uint8_t *address, char *name, size_t size) {
+  if (!this->a2dp_connected())
+    return false;
+  LockGuard guard(this->speaker_lock_);
+  memcpy(address, this->speaker_address_, sizeof(this->speaker_address_));
+  snprintf(name, size, "%s", this->speaker_name_buf_);
+  return true;
 }
 
 #ifdef USE_TEXT_SENSOR
 // Main loop: the name and address of the connected speaker, or empty while none is connected
 void USBBluetooth::publish_connected_speaker_() {
-  if (this->connected_speaker_text_sensor_ == nullptr || !this->speaker_changed_.exchange(false))
+  if (this->connected_speaker_text_sensor_ == nullptr)
     return;
   char text[sizeof(this->speaker_name_buf_) + 24] = "";
-  if (this->a2dp_connected()) {
-    LockGuard guard(this->speaker_lock_);
-    format_speaker(text, sizeof(text), this->speaker_name_buf_, this->speaker_address_);
-  }
+  uint8_t address[6];
+  char name[sizeof(this->speaker_name_buf_)];
+  if (this->connected_speaker(address, name, sizeof(name)))
+    format_speaker(text, sizeof(text), name, address);
   this->connected_speaker_text_sensor_->publish_state(text);
 }
 #endif
@@ -1055,19 +1060,23 @@ bool USBBluetooth::a2dp_setup_() {
 
 // Main loop
 void USBBluetooth::a2dp_poll_() {
+  if (this->speaker_changed_.exchange(false, std::memory_order_acq_rel)) {
 #ifdef USE_TEXT_SENSOR
-  this->publish_connected_speaker_();
+    this->publish_connected_speaker_();
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+    if (this->speaker_select_ != nullptr)
+      this->speaker_select_->connected_speaker_changed();
+#endif
+  }
 #ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
   if (this->found_changed_.exchange(false, std::memory_order_acq_rel) && this->speaker_select_ != nullptr)
     this->speaker_select_->update_options();
 #endif
   if (esp32_ble::global_ble == nullptr || !esp32_ble::global_ble->is_active()) {
-#ifdef USE_TEXT_SENSOR
     // Bluetooth stopped (dongle unplugged): no disconnect event follows
     if (this->a2dp_state_.load(std::memory_order_acquire) != A2DP_IDLE)
       this->speaker_changed_.store(true, std::memory_order_release);
-#endif
     this->a2dp_up_ = false;
     this->scanning_.store(false, std::memory_order_release);
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
