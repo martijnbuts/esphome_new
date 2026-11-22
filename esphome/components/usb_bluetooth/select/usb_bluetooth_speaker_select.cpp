@@ -12,7 +12,6 @@ ESPHOME_LOG_TAG(TAG, "usb_bluetooth.select");
 
 static const char *const OPTION_NONE = "(none)";
 static const char *const OPTION_SEARCH = "Search for speakers";
-static const char *const OPTION_SEARCHING = "Searching...";
 static constexpr uint8_t NO_PEER[6]{};
 
 void USBBluetoothSpeakerSelect::setup() {
@@ -47,13 +46,13 @@ void USBBluetoothSpeakerSelect::update_options() {
     this->option_list_[count] = this->labels_[count];
     this->option_found_[count++] = static_cast<int8_t>(i);
   }
-  const bool scanning = this->parent_->scanning();
-  this->option_list_[count] = scanning ? OPTION_SEARCHING : OPTION_SEARCH;
+  // One fixed label: Home Assistant only knows the options it read when it connected
+  this->option_list_[count] = OPTION_SEARCH;
   this->option_found_[count++] = -1;
   this->option_count_ = count;
   this->traits.set_options_static(this->option_list_, count);
   // While searching the select shows the search; otherwise the current speaker
-  this->publish_state(scanning ? count - 1 : 0);
+  this->publish_state(this->parent_->scanning() ? count - 1 : 0);
 }
 
 void USBBluetoothSpeakerSelect::control(size_t index) {
