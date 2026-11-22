@@ -8,6 +8,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
     VARIANT_ESP32S31,
+    add_idf_sdkconfig_option,
     only_on_variant,
 )
 from esphome.components.usb_host import (
@@ -35,6 +36,7 @@ AUTO_LOAD = ["usb_host"]
 MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
+CONF_A2DP_SPEAKER = "a2dp_speaker"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
@@ -90,6 +92,9 @@ CONFIG_SCHEMA = cv.All(
             # The dongle is the controller of ESP-IDF's Bluedroid host, so esp32_ble and everything on top
             # of it (bluetooth_proxy, ble_client, esp32_ble_tracker) runs on the dongle's radio
             cv.Optional(CONF_BLUEDROID, default=False): cv.boolean,
+            # A Bluetooth speaker (A2DP sink) to stream to over Classic Bluetooth (BR/EDR), as the
+            # usb_bluetooth speaker platform
+            cv.Optional(CONF_A2DP_SPEAKER): cv.mac_address,
         }
     ),
     _validate_firmware,
@@ -132,6 +137,8 @@ def _final_validate(config: ConfigType) -> ConfigType:
 
 
 def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
+    if CONF_A2DP_SPEAKER in config and not config[CONF_BLUEDROID]:
+        raise cv.Invalid(f"{CONF_A2DP_SPEAKER} needs {CONF_BLUEDROID}: true")
     if not config[CONF_BLUEDROID]:
         return config
     full = fv.full_config.get()
@@ -159,6 +166,10 @@ async def to_code(config: ConfigType) -> None:
         # library cannot be serviced from the main loop
         cg.add_define("USE_USB_HOST_LIB_TASK")
         cg.add(var.set_bluedroid())
+        if (speaker := config.get(CONF_A2DP_SPEAKER)) is not None:
+            cg.add_define("USE_USB_BLUETOOTH_A2DP")
+            add_idf_sdkconfig_option("CONFIG_BT_A2DP_ENABLE", True)
+            cg.add(var.set_a2dp_speaker(speaker.as_hex))
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
         cg.add(

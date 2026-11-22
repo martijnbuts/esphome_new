@@ -499,7 +499,10 @@ def final_validation(config: ConfigType) -> None:
 
     # A USB Bluetooth dongle as the controller (usb_bluetooth with bluedroid: true)
     if _uses_usb_bluetooth(full_config):
-        add_idf_sdkconfig_option("CONFIG_BT_CLASSIC_ENABLED", False)
+        # Classic Bluetooth (BR/EDR) on the dongle for an A2DP speaker
+        add_idf_sdkconfig_option(
+            "CONFIG_BT_CLASSIC_ENABLED", _uses_usb_bluetooth_a2dp(full_config)
+        )
         add_idf_sdkconfig_option("CONFIG_BT_BLE_ENABLED", True)
         add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", True)
         add_idf_sdkconfig_option("CONFIG_BT_CONTROLLER_DISABLED", True)
@@ -683,6 +686,14 @@ automation.register_apply_condition("ble.enabled", BLE_AUTOMATION_SCHEMA, "is_ac
 for _name, _call in (("ble.enable", "enable()"), ("ble.disable", "disable()")):
     automation.register_apply_action(
         _name, BLE_AUTOMATION_SCHEMA, automation.ApplyCall(_call)
+    )
+
+
+def _uses_usb_bluetooth_a2dp(full_config: ConfigType) -> bool:
+    """Whether the USB Bluetooth dongle streams to an A2DP speaker (usb_bluetooth with a2dp_speaker)."""
+    return any(
+        c.get("bluedroid") and c.get("a2dp_speaker")
+        for c in full_config.get("usb_bluetooth") or []
     )
 
 

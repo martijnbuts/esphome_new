@@ -12,6 +12,16 @@
 #include "esphome/components/esp32_ble/ble.h"
 #include "esp_bluedroid_hci.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_A2DP
+#include "esphome/core/application.h"
+#include "esp_a2dp_api.h"
+#include "esp_avrc_api.h"
+#include "esp_gap_bt_api.h"
+#include <cmath>
+#endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+#include "speaker/usb_bluetooth_speaker.h"
+#endif
 
 namespace esphome::usb_bluetooth {
 
@@ -111,7 +121,16 @@ void USBBluetooth::hci_send(const uint8_t *h4, uint16_t len) {
 
 // Commands the controller answers with a Command Status event; it answers all others with Command Complete
 static constexpr uint16_t STATUS_OPCODES[] = {
+    0x0401,  // Inquiry
+    0x0405,  // Create Connection
     0x0406,  // Disconnect
+    0x0409,  // Accept Connection Request
+    0x040A,  // Reject Connection Request
+    0x0411,  // Authentication Requested
+    0x0413,  // Set Connection Encryption
+    0x0419,  // Remote Name Request
+    0x041B,  // Read Remote Supported Features
+    0x041C,  // Read Remote Extended Features
     0x041D,  // Read Remote Version Information
     0x200D,  // LE Create Connection
     0x2013,  // LE Connection Update
@@ -121,6 +140,11 @@ static constexpr uint16_t STATUS_OPCODES[] = {
     0x2026,  // LE Generate DHKey
     0x2032,  // LE Set PHY
     0x2043,  // LE Extended Create Connection
+    0x0428,  // Setup Synchronous Connection
+    0x0429,  // Accept Synchronous Connection Request
+    0x0803,  // Sniff Mode
+    0x0804,  // Exit Sniff Mode
+    0x080B,  // Switch Role
 };
 
 // Bluedroid's HCI task. A Command Complete with status success, or a Command Status with Command Disallowed for
@@ -181,6 +205,29 @@ void USBBluetooth::to_host_(uint8_t *h4, size_t len) {
   const auto *host = this->host_;
   if (host != nullptr && this->host_attached_.load(std::memory_order_acquire))
     host->notify_host_recv(h4, static_cast<uint16_t>(len));
+}
+
+// An ACL packet goes to the dongle in one bulk transfer, whose buffer is USB_MAX_PACKET_SIZE bytes. The controller
+// tells the host how long its ACL packets may be (BR/EDR: up to 1021 bytes for 3-DH5); that length is lowered in
+// the reply before Bluedroid reads it, so Bluedroid cuts its L2CAP data into packets that fit.
+static constexpr uint16_t OP_READ_BUFFER_SIZE = 0x1005;
+static constexpr uint16_t OP_LE_READ_BUFFER_SIZE = 0x2002;
+static constexpr uint16_t OP_LE_READ_BUFFER_SIZE_V2 = 0x2060;
+static constexpr uint16_t ACL_OUT_MAX = usb_host::USB_MAX_PACKET_SIZE - 4;
+
+static void fit_acl_length(uint8_t *event, size_t len) {
+  // Command Complete: code, length, number of packets, opcode, status, then the ACL data length (both commands)
+  if (event[0] != HCI_EVENT_COMMAND_COMPLETE || len < 8 || event[5] != 0)
+    return;
+  const uint16_t opcode = encode_uint16(event[4], event[3]);
+  if (opcode != OP_READ_BUFFER_SIZE && opcode != OP_LE_READ_BUFFER_SIZE && opcode != OP_LE_READ_BUFFER_SIZE_V2)
+    return;
+  const uint16_t acl_len = encode_uint16(event[7], event[6]);
+  if (acl_len <= ACL_OUT_MAX)
+    return;
+  event[6] = static_cast<uint8_t>(ACL_OUT_MAX & 0xFF);
+  event[7] = static_cast<uint8_t>(ACL_OUT_MAX >> 8);
+  ESP_LOGD(TAG, "ACL packets to the dongle limited to %u of %u bytes (opcode 0x%04X)", ACL_OUT_MAX, acl_len, opcode);
 }
 
 // USB task. ACL packets are put back together by their own length field, like events.
@@ -401,6 +448,7 @@ bool USBBluetooth::read_event_(uint32_t generation) {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
           for_host = this->host_attached_.load(std::memory_order_acquire);
           if (for_host) {
+            fit_acl_length(this->event_, len);
             this->event_h4_[0] = H4_EVENT;
             this->to_host_(this->event_h4_, len + 1);
           }
@@ -674,9 +722,267 @@ void USBBluetooth::finish_probe_(bool ok) {
   }
 }
 
+#ifdef USE_USB_BLUETOOTH_A2DP
+static constexpr uint32_t A2DP_POLL_ID = 1;
+static constexpr uint32_t A2DP_POLL_MS = 1000;
+static constexpr uint32_t A2DP_RETRY_MS = 10000;
+static constexpr uint32_t A2DP_SUSPEND_AFTER_MS = 3000;
+// AVRCP transaction labels, one per kind of command
+static constexpr uint8_t TL_CAPS = 0;
+static constexpr uint8_t TL_VOLUME_NOTIFY = 1;
+static constexpr uint8_t TL_SET_VOLUME = 2;
+static constexpr uint8_t AVRC_VOLUME_MAX = 0x7F;
+
+// Bluedroid's callbacks have no user pointer; one dongle runs Bluedroid
+static USBBluetooth *g_a2dp = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+// Bluedroid's BTC task
+static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  switch (event) {
+    case ESP_BT_GAP_CFM_REQ_EVT:
+      // Secure Simple Pairing, Just Works: a speaker has no display to compare a number on
+      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+      break;
+    case ESP_BT_GAP_PIN_REQ_EVT: {
+      // Legacy pairing: the usual fixed PIN of speakers and headsets
+      esp_bt_pin_code_t pin{'0', '0', '0', '0'};
+      esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin);
+      break;
+    }
+    case ESP_BT_GAP_AUTH_CMPL_EVT:
+      if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "Paired with '%s'", reinterpret_cast<const char *>(param->auth_cmpl.device_name));
+      } else {
+        ESP_LOGW(TAG, "Pairing failed, status %d", param->auth_cmpl.stat);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+// A2DP source task: fill buf with 16-bit stereo PCM at 44.1 kHz
+static int32_t a2dp_data(uint8_t *buf, int32_t len) {
+  if (buf == nullptr || len <= 0 || g_a2dp == nullptr)
+    return 0;
+  g_a2dp->a2dp_fill_(reinterpret_cast<int16_t *>(buf), static_cast<size_t>(len) / 4);
+  return len;
+}
+
+void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  // Taken out of the buffer also while muted, so playing goes on
+  if (this->a2dp_source_ != nullptr) {
+    this->a2dp_source_->fill(frames, count);
+  } else
+#endif
+  {
+    memset(frames, 0, count * 4);
+  }
+  if (this->a2dp_mute_.load(std::memory_order_acquire)) {
+    memset(frames, 0, count * 4);
+  } else if (this->a2dp_gain_ < 0.999f) {
+    // A speaker without absolute volume: scale the samples
+    const float gain = this->a2dp_gain_;
+    for (size_t i = 0; i < 2 * count; i++)
+      frames[i] = static_cast<int16_t>(frames[i] * gain);
+  }
+}
+
+// Bluedroid's BTC task: only records what happened, the main loop acts on it
+static void a2dp_event(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+  if (g_a2dp == nullptr)
+    return;
+  if (event == ESP_A2D_CONNECTION_STATE_EVT) {
+    g_a2dp->a2dp_connection_(param->conn_stat.state);
+  } else if (event == ESP_A2D_MEDIA_CTRL_ACK_EVT) {
+    g_a2dp->a2dp_media_ack_(param->media_ctrl_stat.cmd, param->media_ctrl_stat.status);
+  }
+}
+
+void USBBluetooth::a2dp_connection_(int state) {
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    ESP_LOGI(TAG, "Speaker connected");
+    this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+  } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+    ESP_LOGI(TAG, "Speaker disconnected");
+    this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+  }
+}
+
+void USBBluetooth::a2dp_media_ack_(int cmd, int status) {
+  const bool ok = status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
+  if (cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) {
+    if (ok)
+      this->a2dp_state_.store(A2DP_READY, std::memory_order_release);
+  } else if (cmd == ESP_A2D_MEDIA_CTRL_START) {
+    if (!ok) {
+      ESP_LOGW(TAG, "The speaker did not start the stream");
+    }
+    this->a2dp_state_.store(ok ? A2DP_STREAMING : A2DP_CONNECTED, std::memory_order_release);
+  } else if (cmd == ESP_A2D_MEDIA_CTRL_SUSPEND && ok) {
+    this->a2dp_state_.store(A2DP_SUSPENDED, std::memory_order_release);
+  }
+}
+
+// Bluedroid's BTC task
+static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param) {
+  if (g_a2dp == nullptr)
+    return;
+  switch (event) {
+    case ESP_AVRC_CT_CONNECTION_STATE_EVT:
+      g_a2dp->avrc_connected_(param->conn_stat.connected);
+      if (param->conn_stat.connected)
+        esp_avrc_ct_send_get_rn_capabilities_cmd(TL_CAPS);
+      break;
+    case ESP_AVRC_CT_GET_RN_CAPABILITIES_RSP_EVT:
+      g_a2dp->avrc_absolute_volume_(esp_avrc_rn_evt_bit_mask_operation(
+          ESP_AVRC_BIT_MASK_OP_TEST, &param->get_rn_caps_rsp.evt_set, ESP_AVRC_RN_VOLUME_CHANGE));
+      break;
+    case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
+      if (param->change_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
+        ESP_LOGD(TAG, "Speaker volume %u of 127", param->change_ntf.event_parameter.volume);
+        // A notification is sent once per registration
+        esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void USBBluetooth::avrc_connected_(bool connected) {
+  if (!connected) {
+    this->avrc_abs_volume_.store(false, std::memory_order_release);
+    this->a2dp_gain_ = this->volume_;
+  }
+}
+
+void USBBluetooth::avrc_absolute_volume_(bool supported) {
+  ESP_LOGD(TAG, "Speaker %s absolute volume", supported ? LOG_STR_LITERAL("supports") : LOG_STR_LITERAL("lacks"));
+  this->avrc_abs_volume_.store(supported, std::memory_order_release);
+  // With absolute volume the speaker sets the level; otherwise the samples are scaled
+  this->a2dp_gain_ = supported ? 1.0f : this->volume_;
+  if (supported) {
+    esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
+    // Before anything plays, set the speaker to the current level
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME,
+                                             static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX)));
+  }
+}
+
+void USBBluetooth::set_volume(float level) {
+  this->volume_ = std::clamp(level, 0.0f, 1.0f);
+  if (this->avrc_abs_volume_.load(std::memory_order_acquire)) {
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME,
+                                             static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX)));
+  } else {
+    this->a2dp_gain_ = this->volume_;
+  }
+}
+
+void USBBluetooth::set_a2dp_speaker(uint64_t address) {
+  for (int i = 0; i < 6; i++)
+    this->a2dp_peer_[i] = static_cast<uint8_t>(address >> (8 * (5 - i)));
+  g_a2dp = this;
+  this->set_interval(A2DP_POLL_ID, A2DP_POLL_MS, [this]() { this->a2dp_poll_(); });
+}
+
+// Main loop. Bluedroid forgets the Classic callbacks and profiles when esp32_ble takes it down (dongle unplugged,
+// ble.disable), so they are set up again each time esp32_ble becomes active.
+bool USBBluetooth::a2dp_setup_() {
+  esp_err_t err = esp_bt_gap_register_callback(a2dp_gap_event);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_bt_gap_register_callback failed: %s", esp_err_to_name(err));
+    return false;
+  }
+  esp_bt_gap_set_device_name(App.get_name().c_str());
+  // No display or keyboard: Just Works pairing
+  esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
+  esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
+  // AVRCP for the speaker's volume (absolute volume, AVRCP 1.4); initialised before A2DP, as in the ESP-IDF example
+  esp_avrc_ct_register_callback(avrc_ct_event);
+  esp_avrc_ct_init();
+  esp_a2d_register_callback(a2dp_event);
+  esp_a2d_source_register_data_callback(a2dp_data);
+  err = esp_a2d_source_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_a2d_source_init failed: %s", esp_err_to_name(err));
+    return false;
+  }
+  // Connectable, so the speaker can connect back when it is switched on; not discoverable
+  err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_bt_gap_set_scan_mode failed: %s", esp_err_to_name(err));
+  }
+  return true;
+}
+
+// Main loop
+void USBBluetooth::a2dp_poll_() {
+  if (esp32_ble::global_ble == nullptr || !esp32_ble::global_ble->is_active()) {
+    this->a2dp_up_ = false;
+    this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+    return;
+  }
+  if (!this->a2dp_up_) {
+    this->a2dp_up_ = this->a2dp_setup_();
+    this->a2dp_last_try_ = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  bool wanted = false;
+#ifdef USE_USB_BLUETOOTH_SPEAKER
+  wanted = this->a2dp_source_ != nullptr && this->a2dp_source_->wants_stream();
+#endif
+  if (wanted)
+    this->a2dp_last_wanted_ = now;
+  switch (this->a2dp_state_.load(std::memory_order_acquire)) {
+    case A2DP_IDLE:
+      if (this->a2dp_last_try_ != 0 && now - this->a2dp_last_try_ < A2DP_RETRY_MS)
+        return;
+      this->a2dp_last_try_ = now == 0 ? 1 : now;
+      if (esp_a2d_source_connect(this->a2dp_peer_) == ESP_OK)
+        this->a2dp_state_.store(A2DP_CONNECTING, std::memory_order_release);
+      return;
+    case A2DP_CONNECTING:
+      // No answer: start over
+      if (now - this->a2dp_last_try_ > 3 * A2DP_RETRY_MS)
+        this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+      return;
+    case A2DP_CONNECTED:
+      // Only stream when there is something to play; the speaker is set up for media once this is acknowledged
+      if (wanted)
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      return;
+    case A2DP_SUSPENDED:
+      if (wanted)
+        this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+      return;
+    case A2DP_READY:
+      this->a2dp_state_.store(A2DP_STARTING, std::memory_order_release);
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+      return;
+    case A2DP_STREAMING:
+      // Nothing to play for a while: suspend; the connection stays and the speaker can go idle
+      if (!wanted && now - this->a2dp_last_wanted_ > A2DP_SUSPEND_AFTER_MS) {
+        this->a2dp_state_.store(A2DP_SUSPENDING, std::memory_order_release);
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+      }
+      return;
+    default:
+      return;
+  }
+}
+#endif
+
 void USBBluetooth::dump_config() {
   usb_host::USBClient::dump_config();
   ESP_LOGCONFIG(TAG, "  Realtek firmware images: %u", static_cast<unsigned>(this->realtek_images_.size()));
+#ifdef USE_USB_BLUETOOTH_A2DP
+  ESP_LOGCONFIG(TAG, "  A2DP speaker: %02X:%02X:%02X:%02X:%02X:%02X", this->a2dp_peer_[0], this->a2dp_peer_[1],
+                this->a2dp_peer_[2], this->a2dp_peer_[3], this->a2dp_peer_[4], this->a2dp_peer_[5]);
+#endif
 }
 
 }  // namespace esphome::usb_bluetooth
