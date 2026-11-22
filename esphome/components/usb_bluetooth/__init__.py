@@ -31,7 +31,8 @@ from . import realtek
 DOMAIN = "usb_bluetooth"
 CODEOWNERS = ["@martijnbuts"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["usb_host"]
+# watchdog: esp32_ble holds off the task watchdog while Bluedroid starts on the dongle
+AUTO_LOAD = ["usb_host", "watchdog"]
 MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
