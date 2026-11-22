@@ -951,6 +951,11 @@ static void avrc_tg_event(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *
       // Whether the speaker can send buttons: its AVRCP controller features
       ESP_LOGD(TAG, "Speaker AVRCP features 0x%08" PRIX32 ", controller flags 0x%04X", param->rmt_feats.feat_mask,
                param->rmt_feats.ct_feat_flag);
+      // Play, pause, next and previous are category 1 of an AVRCP controller; many speakers only have volume
+      if ((param->rmt_feats.feat_mask & ESP_AVRC_FEAT_RCCT) == 0 ||
+          (param->rmt_feats.ct_feat_flag & ESP_AVRC_FEAT_FLAG_CAT1) == 0) {
+        ESP_LOGI(TAG, "The speaker does not send play, pause, next or previous (no AVRCP controller category 1)");
+      }
       break;
     case ESP_AVRC_TG_PASSTHROUGH_CMD_EVT:
       ESP_LOGD(TAG, "Speaker key 0x%02X %s", param->psth_cmd.key_code,
