@@ -21,6 +21,9 @@
 #ifdef USE_USB_BLUETOOTH_SPEAKER
 #include "speaker/usb_bluetooth_speaker.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+#include "select/usb_bluetooth_speaker_select.h"
+#endif
 
 namespace esphome::usb_bluetooth {
 
@@ -749,6 +752,34 @@ static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p
       if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS && g_a2dp != nullptr)
         g_a2dp->speaker_name_(param->read_rmt_name.bda, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name));
       break;
+    case ESP_BT_GAP_DISC_RES_EVT: {
+      if (g_a2dp == nullptr)
+        break;
+      uint32_t cod = 0;
+      char name[ESP_BT_GAP_MAX_BDNAME_LEN + 1] = "";
+      for (int i = 0; i < param->disc_res.num_prop; i++) {
+        const esp_bt_gap_dev_prop_t &prop = param->disc_res.prop[i];
+        if (prop.type == ESP_BT_GAP_DEV_PROP_COD) {
+          cod = *static_cast<uint32_t *>(prop.val);
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_BDNAME && name[0] == 0) {
+          snprintf(name, sizeof(name), "%.*s", prop.len, static_cast<const char *>(prop.val));
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_EIR && name[0] == 0) {
+          uint8_t len = 0;
+          auto *eir = static_cast<uint8_t *>(prop.val);
+          const uint8_t *found = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &len);
+          if (found == nullptr)
+            found = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &len);
+          if (found != nullptr)
+            snprintf(name, sizeof(name), "%.*s", len, reinterpret_cast<const char *>(found));
+        }
+      }
+      g_a2dp->found_speaker_(param->disc_res.bda, cod, name);
+      break;
+    }
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
+      if (g_a2dp != nullptr)
+        g_a2dp->scan_state_(param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED);
+      break;
     case ESP_BT_GAP_AUTH_CMPL_EVT:
       if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "Paired with '%s'", reinterpret_cast<const char *>(param->auth_cmpl.device_name));
@@ -802,6 +833,12 @@ void USBBluetooth::a2dp_connection_(int state, const uint8_t *address) {
   if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
     ESP_LOGI(TAG, "Speaker %02X:%02X:%02X:%02X:%02X:%02X connected", address[0], address[1], address[2], address[3],
              address[4], address[5]);
+    // A speaker chosen earlier can connect by itself; only the chosen one stays
+    if (memcmp(address, this->a2dp_peer_, sizeof(this->a2dp_peer_)) != 0) {
+      ESP_LOGI(TAG, "Not the chosen speaker; disconnecting");
+      esp_a2d_source_disconnect(const_cast<uint8_t *>(address));
+      return;
+    }
     this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
     this->speaker_name_(address, "");
     // The name arrives as ESP_BT_GAP_READ_REMOTE_NAME_EVT
@@ -913,11 +950,77 @@ void USBBluetooth::set_volume(float level) {
   }
 }
 
+void USBBluetooth::enable_a2dp() {
+  g_a2dp = this;
+  this->set_interval(A2DP_POLL_ID, A2DP_POLL_MS, [this]() { this->a2dp_poll_(); });
+}
+
 void USBBluetooth::set_a2dp_speaker(uint64_t address) {
   for (int i = 0; i < 6; i++)
     this->a2dp_peer_[i] = static_cast<uint8_t>(address >> (8 * (5 - i)));
-  g_a2dp = this;
-  this->set_interval(A2DP_POLL_ID, A2DP_POLL_MS, [this]() { this->a2dp_poll_(); });
+  this->enable_a2dp();
+}
+
+void USBBluetooth::set_a2dp_peer(const uint8_t *address) {
+  if (memcmp(address, this->a2dp_peer_, sizeof(this->a2dp_peer_)) == 0)
+    return;
+  uint8_t previous[6];
+  memcpy(previous, this->a2dp_peer_, sizeof(previous));
+  memcpy(this->a2dp_peer_, address, sizeof(this->a2dp_peer_));
+  this->a2dp_last_try_ = 0;
+  ESP_LOGI(TAG, "Speaker set to %02X:%02X:%02X:%02X:%02X:%02X", address[0], address[1], address[2], address[3],
+           address[4], address[5]);
+  // The disconnect event sets A2DP_IDLE, and the next poll connects to the new speaker
+  if (this->a2dp_up_ && this->a2dp_state_.load(std::memory_order_acquire) != A2DP_IDLE)
+    esp_a2d_source_disconnect(previous);
+}
+
+void USBBluetooth::scan_speakers() {
+  if (!this->a2dp_up_) {
+    ESP_LOGW(TAG, "Bluetooth is not running; cannot search for speakers");
+    return;
+  }
+  {
+    LockGuard guard(this->found_lock_);
+    this->found_count_ = 0;
+  }
+  this->found_changed_.store(true, std::memory_order_release);
+  // 10 x 1.28 s, the inquiry length of the Bluetooth specification for a general search
+  esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_bt_gap_start_discovery failed: %s", esp_err_to_name(err));
+    return;
+  }
+  // Set here too, so the select shows the search before Bluedroid reports it
+  this->scanning_.store(true, std::memory_order_release);
+}
+
+uint8_t USBBluetooth::found_speakers(FoundSpeaker *out) {
+  LockGuard guard(this->found_lock_);
+  memcpy(out, this->found_, this->found_count_ * sizeof(FoundSpeaker));
+  return this->found_count_;
+}
+
+// Bluedroid's BTC task
+void USBBluetooth::found_speaker_(const uint8_t *address, uint32_t cod, const char *name) {
+  if (!is_audio_device(cod))
+    return;
+  bool changed;
+  {
+    LockGuard guard(this->found_lock_);
+    changed = add_found_speaker(this->found_, this->found_count_, MAX_FOUND_SPEAKERS, address, name);
+  }
+  if (changed) {
+    ESP_LOGD(TAG, "Found %02X:%02X:%02X:%02X:%02X:%02X '%s'", address[0], address[1], address[2], address[3],
+             address[4], address[5], name);
+    this->found_changed_.store(true, std::memory_order_release);
+  }
+}
+
+// Bluedroid's BTC task
+void USBBluetooth::scan_state_(bool running) {
+  this->scanning_.store(running, std::memory_order_release);
+  this->found_changed_.store(true, std::memory_order_release);
 }
 
 // Main loop. Bluedroid forgets the Classic callbacks and profiles when esp32_ble takes it down (dongle unplugged,
@@ -955,6 +1058,10 @@ void USBBluetooth::a2dp_poll_() {
 #ifdef USE_TEXT_SENSOR
   this->publish_connected_speaker_();
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+  if (this->found_changed_.exchange(false, std::memory_order_acq_rel) && this->speaker_select_ != nullptr)
+    this->speaker_select_->update_options();
+#endif
   if (esp32_ble::global_ble == nullptr || !esp32_ble::global_ble->is_active()) {
 #ifdef USE_TEXT_SENSOR
     // Bluetooth stopped (dongle unplugged): no disconnect event follows
@@ -962,6 +1069,7 @@ void USBBluetooth::a2dp_poll_() {
       this->speaker_changed_.store(true, std::memory_order_release);
 #endif
     this->a2dp_up_ = false;
+    this->scanning_.store(false, std::memory_order_release);
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
     return;
   }
@@ -977,8 +1085,11 @@ void USBBluetooth::a2dp_poll_() {
 #endif
   if (wanted)
     this->a2dp_last_wanted_ = now;
+  static constexpr uint8_t NO_PEER[6]{};
+  // A connection attempt during a search fails, as the radio is busy with the search
+  const bool may_connect = !this->scanning() && memcmp(this->a2dp_peer_, NO_PEER, sizeof(this->a2dp_peer_)) != 0;
   const A2dpState state = this->a2dp_state_.load(std::memory_order_acquire);
-  const A2dpStep step = a2dp_step(state, wanted, now, this->a2dp_last_try_, this->a2dp_last_wanted_);
+  const A2dpStep step = a2dp_step(state, wanted, may_connect, now, this->a2dp_last_try_, this->a2dp_last_wanted_);
   switch (step.action) {
     case A2dpAction::A2DP_ACTION_CONNECT:
       this->a2dp_last_try_ = now == 0 ? 1 : now;

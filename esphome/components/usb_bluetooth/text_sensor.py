@@ -3,11 +3,9 @@
 import esphome.codegen as cg
 from esphome.components import text_sensor
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
-import esphome.final_validate as fv
 from esphome.types import ConfigType
 
-from . import CONF_A2DP_SPEAKER, CONF_USB_BLUETOOTH_ID, DOMAIN, USBBluetooth
+from . import CONF_USB_BLUETOOTH_ID, DOMAIN, USBBluetooth, require_a2dp
 
 DEPENDENCIES = [DOMAIN]
 
@@ -29,12 +27,7 @@ CONFIG_SCHEMA = cv.Schema(
 def _final_validate(config: ConfigType) -> ConfigType:
     if CONF_CONNECTED_SPEAKER not in config:
         return config
-    parent_id = config[CONF_USB_BLUETOOTH_ID]
-    for entry in fv.full_config.get().get(DOMAIN) or []:
-        if entry[CONF_ID] == parent_id and CONF_A2DP_SPEAKER not in entry:
-            raise cv.Invalid(
-                f"{CONF_CONNECTED_SPEAKER} needs {CONF_A2DP_SPEAKER} on the usb_bluetooth entry '{parent_id}'"
-            )
+    require_a2dp(config[CONF_USB_BLUETOOTH_ID], CONF_CONNECTED_SPEAKER)
     return config
 
 

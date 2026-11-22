@@ -690,11 +690,12 @@ for _name, _call in (("ble.enable", "enable()"), ("ble.disable", "disable()")):
 
 
 def _uses_usb_bluetooth_a2dp(full_config: ConfigType) -> bool:
-    """Whether the USB Bluetooth dongle streams to an A2DP speaker (usb_bluetooth with a2dp_speaker)."""
-    return any(
-        c.get("bluedroid") and c.get("a2dp_speaker")
-        for c in full_config.get("usb_bluetooth") or []
-    )
+    """Whether the USB Bluetooth dongle streams to an A2DP speaker."""
+    if "usb_bluetooth" not in full_config:
+        return False
+    from esphome.components.usb_bluetooth import uses_a2dp
+
+    return any(uses_a2dp(c, full_config) for c in full_config["usb_bluetooth"])
 
 
 def _uses_usb_bluetooth(full_config: ConfigType) -> bool:

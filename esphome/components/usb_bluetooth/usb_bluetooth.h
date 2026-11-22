@@ -27,6 +27,9 @@ namespace esphome::usb_bluetooth {
 #ifdef USE_USB_BLUETOOTH_SPEAKER
 class USBBluetoothSpeaker;
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+class USBBluetoothSpeakerSelect;
+#endif
 
 /// A USB Bluetooth dongle (Bluetooth Core Specification, USB transport) as a usb_host client.
 ///
@@ -66,8 +69,24 @@ class USBBluetooth final : public usb_host::USBClient {
   void hci_attach(const ::esp_bluedroid_hci_driver_callbacks *callbacks);
 #endif
 #ifdef USE_USB_BLUETOOTH_A2DP
+  /// Stream to an A2DP sink (speaker); the speaker is set with set_a2dp_speaker() or chosen at run time.
+  void enable_a2dp();
   /// The A2DP sink (speaker) to connect to and stream to, as a 48-bit address.
   void set_a2dp_speaker(uint64_t address);
+  /// Main loop: connect to this speaker from now on; a connection to another one is closed.
+  void set_a2dp_peer(const uint8_t *address);
+  /// The speaker to connect to; all zero while none is chosen.
+  const uint8_t *a2dp_peer() const { return this->a2dp_peer_; }
+  /// Main loop: search 13 s for audio devices. The list of the previous search is cleared.
+  void scan_speakers();
+  /// Whether a search for speakers is running.
+  bool scanning() const { return this->scanning_.load(std::memory_order_acquire); }
+  /// Copy the devices found by the last search into out, MAX_FOUND_SPEAKERS entries; returns how many.
+  uint8_t found_speakers(FoundSpeaker *out);
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+  /// The select that lists the found speakers; told from the main loop when the list changes.
+  void set_speaker_select(USBBluetoothSpeakerSelect *select) { this->speaker_select_ = select; }
+#endif
   /// The speaker volume, 0..1: sent to the speaker over AVRCP (absolute volume), or applied to the samples.
   void set_volume(float level);
   /// Silence the audio to the speaker.
@@ -87,6 +106,8 @@ class USBBluetooth final : public usb_host::USBClient {
   void a2dp_connection_(int state, const uint8_t *address);
   void a2dp_media_ack_(int cmd, int status);
   void speaker_name_(const uint8_t *address, const char *name);
+  void found_speaker_(const uint8_t *address, uint32_t cod, const char *name);
+  void scan_state_(bool running);
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(connected_speaker)
 #endif
@@ -205,6 +226,15 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_SPEAKER
   USBBluetoothSpeaker *a2dp_source_{nullptr};
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
+  USBBluetoothSpeakerSelect *speaker_select_{nullptr};
+#endif
+  // Devices found by the last search, written by Bluedroid's BTC task and read from the main loop
+  Mutex found_lock_;
+  FoundSpeaker found_[MAX_FOUND_SPEAKERS]{};
+  uint8_t found_count_{0};
+  std::atomic<bool> found_changed_{false};
+  std::atomic<bool> scanning_{false};
 #endif
 
   uint32_t fragment_{0};

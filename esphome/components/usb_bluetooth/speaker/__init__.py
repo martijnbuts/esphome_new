@@ -10,14 +10,13 @@ from esphome.const import (
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
 )
-import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from .. import (
-    CONF_A2DP_SPEAKER,
     CONF_USB_BLUETOOTH_ID,
-    DOMAIN,
+    DOMAIN as DOMAIN,
     USBBluetooth,
+    require_a2dp,
     usb_bluetooth_ns,
 )
 
@@ -76,12 +75,7 @@ CONFIG_SCHEMA = cv.All(
 
 
 def _final_validate(config: ConfigType) -> ConfigType:
-    parent_id = config[CONF_USB_BLUETOOTH_ID]
-    for entry in fv.full_config.get().get(DOMAIN) or []:
-        if entry[CONF_ID] == parent_id and CONF_A2DP_SPEAKER not in entry:
-            raise cv.Invalid(
-                f"The usb_bluetooth entry '{parent_id}' needs {CONF_A2DP_SPEAKER}"
-            )
+    require_a2dp(config[CONF_USB_BLUETOOTH_ID], "The speaker platform")
     return config
 
 

@@ -23,7 +23,8 @@ from esphome.components.usb_host import (
     validate_usb_clients,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_PLATFORM
+from esphome.core import CORE
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -53,6 +54,27 @@ MIN_TRANSFER_REQUESTS_BLUEDROID = 8
 usb_bluetooth_ns = cg.esphome_ns.namespace("usb_bluetooth")
 USBBluetooth = usb_bluetooth_ns.class_("USBBluetooth", USBClient)
 RealtekImage = USBBluetooth.class_("RealtekImage")
+
+
+def uses_a2dp(entry: ConfigType, full_config: ConfigType) -> bool:
+    """Whether a usb_bluetooth entry streams to a speaker: it has a2dp_speaker, or a select chooses the speaker."""
+    if not entry.get(CONF_BLUEDROID):
+        return False
+    return CONF_A2DP_SPEAKER in entry or any(
+        conf.get(CONF_PLATFORM) == DOMAIN
+        and conf.get(CONF_USB_BLUETOOTH_ID) == entry[CONF_ID]
+        for conf in full_config.get("select") or []
+    )
+
+
+def require_a2dp(parent_id: object, what: str) -> None:
+    """Raise unless the usb_bluetooth entry parent_id streams to a speaker; for its A2DP platforms."""
+    full = fv.full_config.get()
+    for entry in full.get(DOMAIN) or []:
+        if entry[CONF_ID] == parent_id and not uses_a2dp(entry, full):
+            raise cv.Invalid(
+                f"{what} needs {CONF_A2DP_SPEAKER} or a speaker select on the usb_bluetooth entry '{parent_id}'"
+            )
 
 
 def _read_firmware(config: ConfigType) -> tuple[dict[int, bytes], int]:
@@ -168,10 +190,13 @@ async def to_code(config: ConfigType) -> None:
         # library cannot be serviced from the main loop
         cg.add_define("USE_USB_HOST_LIB_TASK")
         cg.add(var.set_bluedroid())
-        if (speaker := config.get(CONF_A2DP_SPEAKER)) is not None:
+        if uses_a2dp(config, CORE.config):
             cg.add_define("USE_USB_BLUETOOTH_A2DP")
             add_idf_sdkconfig_option("CONFIG_BT_A2DP_ENABLE", True)
-            cg.add(var.set_a2dp_speaker(speaker.as_hex))
+            if (speaker := config.get(CONF_A2DP_SPEAKER)) is not None:
+                cg.add(var.set_a2dp_speaker(speaker.as_hex))
+            else:
+                cg.add(var.enable_a2dp())
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
         cg.add(

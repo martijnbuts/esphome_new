@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace esphome::usb_bluetooth {
 
@@ -44,13 +45,14 @@ static constexpr uint32_t A2DP_SUSPEND_AFTER_MS = 3000;
 /// Highest AVRCP absolute volume.
 static constexpr uint8_t AVRC_VOLUME_MAX = 0x7F;
 
-/// One step of the A2DP state machine. wanted: there is audio to stream. last_try: millis() of the last connection
-/// attempt, 0 for none yet. last_wanted: millis() when audio was last wanted. The caller does the action; a failed
-/// connection request keeps A2DP_IDLE.
-inline A2dpStep a2dp_step(A2dpState state, bool wanted, uint32_t now, uint32_t last_try, uint32_t last_wanted) {
+/// One step of the A2DP state machine. wanted: there is audio to stream. may_connect: a speaker is chosen and no
+/// search is running. last_try: millis() of the last connection attempt, 0 for none yet. last_wanted: millis() when
+/// audio was last wanted. The caller does the action; a failed connection request keeps A2DP_IDLE.
+inline A2dpStep a2dp_step(A2dpState state, bool wanted, bool may_connect, uint32_t now, uint32_t last_try,
+                          uint32_t last_wanted) {
   switch (state) {
     case A2DP_IDLE:
-      if (last_try != 0 && now - last_try < A2DP_RETRY_MS)
+      if (!may_connect || (last_try != 0 && now - last_try < A2DP_RETRY_MS))
         return {A2DP_IDLE, A2dpAction::A2DP_ACTION_NONE};
       return {A2DP_CONNECTING, A2dpAction::A2DP_ACTION_CONNECT};
     case A2DP_CONNECTING:
@@ -96,6 +98,40 @@ inline void format_speaker(char *out, size_t size, const char *name, const uint8
   const bool named = name[0] != 0;
   snprintf(out, size, "%s%s%02X:%02X:%02X:%02X:%02X:%02X%s", name, named ? " (" : "", address[0], address[1],
            address[2], address[3], address[4], address[5], named ? ")" : "");
+}
+
+/// A device found by a search for speakers.
+struct FoundSpeaker {
+  uint8_t address[6];
+  char name[32];
+};
+
+/// Devices kept from one search.
+static constexpr uint8_t MAX_FOUND_SPEAKERS = 8;
+
+/// Whether a Bluetooth Class of Device is an audio or video device (speaker, headphones, radio, car audio).
+inline bool is_audio_device(uint32_t cod) {
+  static constexpr uint32_t MAJOR_AUDIO_VIDEO = 0x04;
+  return ((cod >> 8) & 0x1F) == MAJOR_AUDIO_VIDEO;
+}
+
+/// Add a device to the found list, or fill in its name; true when the list changed. Devices past max are dropped.
+inline bool add_found_speaker(FoundSpeaker *list, uint8_t &count, uint8_t max, const uint8_t *address,
+                              const char *name) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (memcmp(list[i].address, address, sizeof(list[i].address)) != 0)
+      continue;
+    if (name[0] == 0 || strncmp(list[i].name, name, sizeof(list[i].name) - 1) == 0)
+      return false;
+    snprintf(list[i].name, sizeof(list[i].name), "%s", name);
+    return true;
+  }
+  if (count >= max)
+    return false;
+  memcpy(list[count].address, address, sizeof(list[count].address));
+  snprintf(list[count].name, sizeof(list[count].name), "%s", name);
+  count++;
+  return true;
 }
 
 }  // namespace esphome::usb_bluetooth

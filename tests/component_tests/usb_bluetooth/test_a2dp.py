@@ -86,14 +86,14 @@ def test_connected_speaker_text_sensor(
         pytest.param(
             "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n\n"
             "speaker:\n  - platform: usb_bluetooth\n    id: bt_speaker\n",
-            "The usb_bluetooth entry 'bt' needs a2dp_speaker",
+            "The speaker platform needs a2dp_speaker or a speaker select on the usb_bluetooth entry 'bt'",
             id="speaker_platform_needs_a2dp_speaker",
         ),
         pytest.param(
             "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n\n"
             "text_sensor:\n  - platform: usb_bluetooth\n"
             "    connected_speaker:\n      name: Connected speaker\n",
-            "connected_speaker needs a2dp_speaker on the usb_bluetooth entry 'bt'",
+            "connected_speaker needs a2dp_speaker or a speaker select on the usb_bluetooth entry 'bt'",
             id="text_sensor_needs_a2dp_speaker",
         ),
     ],
