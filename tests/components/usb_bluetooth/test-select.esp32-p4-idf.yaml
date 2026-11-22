@@ -5,6 +5,10 @@ usb_host:
 usb_bluetooth:
   - id: usb_bt
     bluedroid: true
+    on_speaker_volume:
+      - logger.log:
+          format: "Speaker volume %.2f"
+          args: [x]
 
 esp32_ble_tracker:
 
@@ -16,3 +20,8 @@ select:
   - platform: usb_bluetooth
     speaker:
       name: Bluetooth speaker
+
+event:
+  - platform: usb_bluetooth
+    speaker_buttons:
+      name: Speaker buttons

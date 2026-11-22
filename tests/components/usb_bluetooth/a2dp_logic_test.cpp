@@ -175,4 +175,39 @@ TEST(AddFoundSpeaker, LongNameIsCut) {
   EXPECT_EQ(strlen(list[0].name), sizeof(list[0].name) - 1);
 }
 
+struct ButtonCase {
+  uint8_t key_code;
+  SpeakerButton button;
+};
+
+class SpeakerButtonTest : public ::testing::TestWithParam<ButtonCase> {};
+
+TEST_P(SpeakerButtonTest, KeyCode) { EXPECT_EQ(speaker_button(GetParam().key_code), GetParam().button); }
+
+INSTANTIATE_TEST_SUITE_P(UsbBluetooth, SpeakerButtonTest,
+                         ::testing::Values(ButtonCase{0x44, SpeakerButton::SPEAKER_BUTTON_PLAY},
+                                           ButtonCase{0x46, SpeakerButton::SPEAKER_BUTTON_PAUSE},
+                                           ButtonCase{0x45, SpeakerButton::SPEAKER_BUTTON_STOP},
+                                           ButtonCase{0x4B, SpeakerButton::SPEAKER_BUTTON_NEXT},
+                                           ButtonCase{0x4C, SpeakerButton::SPEAKER_BUTTON_PREVIOUS},
+                                           ButtonCase{0x41, SpeakerButton::SPEAKER_BUTTON_VOLUME_UP},
+                                           ButtonCase{0x42, SpeakerButton::SPEAKER_BUTTON_VOLUME_DOWN},
+                                           ButtonCase{0x40, SpeakerButton::SPEAKER_BUTTON_NONE},
+                                           ButtonCase{0x00, SpeakerButton::SPEAKER_BUTTON_NONE}));
+
+TEST(SpeakerButtonNames, OneNamePerButton) {
+  EXPECT_EQ(sizeof(SPEAKER_BUTTON_NAMES) / sizeof(SPEAKER_BUTTON_NAMES[0]),
+            static_cast<size_t>(SpeakerButton::SPEAKER_BUTTON_NONE));
+  EXPECT_STREQ(SPEAKER_BUTTON_NAMES[static_cast<uint8_t>(SpeakerButton::SPEAKER_BUTTON_NEXT)], "next");
+}
+
+TEST(AvrcLevel, RoundTrip) {
+  EXPECT_FLOAT_EQ(avrc_level(0), 0.0f);
+  EXPECT_FLOAT_EQ(avrc_level(127), 1.0f);
+  EXPECT_FLOAT_EQ(avrc_level(200), 1.0f);
+  // A level set from the speaker's volume gives that volume back, so it is not sent back as a change
+  for (unsigned volume = 0; volume <= 127; volume++)
+    EXPECT_EQ(avrc_volume(avrc_level(volume)), volume);
+}
+
 }  // namespace esphome::usb_bluetooth::testing

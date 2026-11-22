@@ -18,6 +18,9 @@
 #if defined(USE_USB_BLUETOOTH_A2DP) && defined(USE_TEXT_SENSOR)
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+#include "esphome/components/event/event.h"
+#endif
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
 struct esp_bluedroid_hci_driver_callbacks;
 #endif
@@ -113,6 +116,18 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(connected_speaker)
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+  /// The event entity for the buttons on the speaker.
+  void set_speaker_buttons_event(event::Event *event) { this->speaker_buttons_event_ = event; }
+  // Bluedroid's BTC task (AVRCP target)
+  void speaker_button_(uint8_t key_code);
+#endif
+  /// Called with the level (0 to 1) when the volume is changed on the speaker itself.
+  template<typename F> void add_on_speaker_volume_callback(F &&callback) {
+    this->speaker_volume_callback_.add(std::forward<F>(callback));
+  }
+  // Bluedroid's BTC task (AVRCP volume notification)
+  void speaker_volume_(uint8_t volume);
 #endif
 
   /// Whether a controller is connected and answered the start-up commands.
@@ -237,6 +252,16 @@ class USBBluetooth final : public usb_host::USBClient {
   uint8_t found_count_{0};
   std::atomic<bool> found_changed_{false};
   std::atomic<bool> scanning_{false};
+  // Main loop: hand on what the speaker reported from Bluedroid's BTC task
+  bool process_speaker_reports_();
+  LazyCallbackManager<void(float)> speaker_volume_callback_;
+  // The last volume the speaker reported, 0..127; -1 when handed on
+  std::atomic<int16_t> reported_volume_{-1};
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+  event::Event *speaker_buttons_event_{nullptr};
+  // One bit per SpeakerButton pressed since the main loop last looked
+  std::atomic<uint8_t> buttons_pressed_{0};
+#endif
 #endif
 
   uint32_t fragment_{0};

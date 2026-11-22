@@ -1,5 +1,6 @@
 """A USB Bluetooth dongle (HCI over USB) as a usb_host client."""
 
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components.const import CONF_FIRMWARE, CONF_MANUFACTURER
 from esphome.components.esp32 import (
@@ -40,6 +41,7 @@ MULTI_CONF = True
 CONF_BLUEDROID = "bluedroid"
 CONF_A2DP_SPEAKER = "a2dp_speaker"
 CONF_USB_BLUETOOTH_ID = "usb_bluetooth_id"
+CONF_ON_SPEAKER_VOLUME = "on_speaker_volume"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
@@ -119,6 +121,8 @@ CONFIG_SCHEMA = cv.All(
             # A Bluetooth speaker (A2DP sink) to stream to over Classic Bluetooth (BR/EDR), as the
             # usb_bluetooth speaker platform
             cv.Optional(CONF_A2DP_SPEAKER): cv.mac_address,
+            # The volume was changed on the speaker itself; x is the level from 0 to 1
+            cv.Optional(CONF_ON_SPEAKER_VOLUME): automation.validate_automation({}),
         }
     ),
     _validate_firmware,
@@ -163,9 +167,13 @@ def _final_validate(config: ConfigType) -> ConfigType:
 def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
     if CONF_A2DP_SPEAKER in config and not config[CONF_BLUEDROID]:
         raise cv.Invalid(f"{CONF_A2DP_SPEAKER} needs {CONF_BLUEDROID}: true")
+    full = fv.full_config.get()
+    if CONF_ON_SPEAKER_VOLUME in config and not uses_a2dp(config, full):
+        raise cv.Invalid(
+            f"{CONF_ON_SPEAKER_VOLUME} needs {CONF_A2DP_SPEAKER} or a speaker select"
+        )
     if not config[CONF_BLUEDROID]:
         return config
-    full = fv.full_config.get()
     if "esp32_ble" not in full:
         raise cv.Invalid(
             f"{CONF_BLUEDROID} is for esp32_ble, which this configuration does not have"
@@ -197,6 +205,10 @@ async def to_code(config: ConfigType) -> None:
                 cg.add(var.set_a2dp_speaker(speaker.as_hex))
             else:
                 cg.add(var.enable_a2dp())
+            for conf in config.get(CONF_ON_SPEAKER_VOLUME, []):
+                await automation.build_callback_automation(
+                    var, "add_on_speaker_volume_callback", [(cg.float_, "x")], conf
+                )
     if CONF_FIRMWARE in config:
         images, lmp_subver = _read_firmware(config)
         cg.add(

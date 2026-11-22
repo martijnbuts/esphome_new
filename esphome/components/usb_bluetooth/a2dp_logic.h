@@ -100,6 +100,44 @@ inline void format_speaker(char *out, size_t size, const char *name, const uint8
            address[2], address[3], address[4], address[5], named ? ")" : "");
 }
 
+/// A button on the speaker, sent to the ESP32 as an AVRCP pass-through command.
+enum class SpeakerButton : uint8_t {
+  SPEAKER_BUTTON_PLAY,
+  SPEAKER_BUTTON_PAUSE,
+  SPEAKER_BUTTON_STOP,
+  SPEAKER_BUTTON_NEXT,
+  SPEAKER_BUTTON_PREVIOUS,
+  SPEAKER_BUTTON_VOLUME_UP,
+  SPEAKER_BUTTON_VOLUME_DOWN,
+  SPEAKER_BUTTON_NONE,
+};
+
+/// Event type names of the buttons, in the order of SpeakerButton.
+static constexpr const char *SPEAKER_BUTTON_NAMES[] = {"play",     "pause",     "stop",       "next",
+                                                       "previous", "volume_up", "volume_down"};
+
+/// The button of an AVRCP pass-through operation id (AV/C Panel Subunit), or SPEAKER_BUTTON_NONE.
+inline SpeakerButton speaker_button(uint8_t key_code) {
+  struct KeyButton {
+    uint8_t key_code;
+    SpeakerButton button;
+  };
+  static constexpr KeyButton KEY_BUTTONS[] = {
+      {0x44, SpeakerButton::SPEAKER_BUTTON_PLAY},        {0x46, SpeakerButton::SPEAKER_BUTTON_PAUSE},
+      {0x45, SpeakerButton::SPEAKER_BUTTON_STOP},        {0x4B, SpeakerButton::SPEAKER_BUTTON_NEXT},
+      {0x4C, SpeakerButton::SPEAKER_BUTTON_PREVIOUS},    {0x41, SpeakerButton::SPEAKER_BUTTON_VOLUME_UP},
+      {0x42, SpeakerButton::SPEAKER_BUTTON_VOLUME_DOWN},
+  };
+  for (const auto &entry : KEY_BUTTONS) {
+    if (entry.key_code == key_code)
+      return entry.button;
+  }
+  return SpeakerButton::SPEAKER_BUTTON_NONE;
+}
+
+/// The level from 0 to 1 of an AVRCP absolute volume (0..127).
+inline float avrc_level(uint8_t volume) { return std::min<uint8_t>(volume, AVRC_VOLUME_MAX) / float(AVRC_VOLUME_MAX); }
+
 /// A device found by a search for speakers.
 struct FoundSpeaker {
   uint8_t address[6];

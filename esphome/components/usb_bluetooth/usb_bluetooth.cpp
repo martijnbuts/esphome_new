@@ -560,6 +560,10 @@ void USBBluetooth::loop() {
       this->handle_command_complete_(ret, len);
     }
   }
+#ifdef USE_USB_BLUETOOTH_A2DP
+  if (this->process_speaker_reports_())
+    work = true;
+#endif
   if (!work)
     this->disable_loop();
 }
@@ -918,6 +922,7 @@ static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *
     case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
       if (param->change_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
         ESP_LOGD(TAG, "Speaker volume %u of 127", param->change_ntf.event_parameter.volume);
+        g_a2dp->speaker_volume_(param->change_ntf.event_parameter.volume);
         // A notification is sent once per registration
         esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
       }
@@ -925,6 +930,57 @@ static void avrc_ct_event(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *
     default:
       break;
   }
+}
+
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+// Bluedroid's BTC task: the speaker as AVRCP controller sends its buttons to the ESP32 as target
+static void avrc_tg_event(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
+  if (g_a2dp == nullptr)
+    return;
+  if (event == ESP_AVRC_TG_PASSTHROUGH_CMD_EVT && param->psth_cmd.key_state == ESP_AVRC_PT_CMD_STATE_PRESSED) {
+    g_a2dp->speaker_button_(param->psth_cmd.key_code);
+  }
+}
+
+void USBBluetooth::speaker_button_(uint8_t key_code) {
+  const SpeakerButton button = speaker_button(key_code);
+  if (button == SpeakerButton::SPEAKER_BUTTON_NONE) {
+    ESP_LOGD(TAG, "Speaker button 0x%02X not handled", key_code);
+    return;
+  }
+  this->buttons_pressed_.fetch_or(1 << static_cast<uint8_t>(button), std::memory_order_acq_rel);
+  this->enable_loop_soon_any_context();
+}
+#endif
+
+// Bluedroid's BTC task
+void USBBluetooth::speaker_volume_(uint8_t volume) {
+  this->reported_volume_.store(volume, std::memory_order_release);
+  this->enable_loop_soon_any_context();
+}
+
+// Main loop; true when there was something to hand on
+bool USBBluetooth::process_speaker_reports_() {
+  bool work = false;
+  const int16_t volume = this->reported_volume_.exchange(-1, std::memory_order_acq_rel);
+  // The speaker also reports a level the ESP32 just set; that one is not handed back
+  if (volume >= 0 && volume != avrc_volume(this->volume_)) {
+    work = true;
+    this->volume_ = avrc_level(static_cast<uint8_t>(volume));
+    this->speaker_volume_callback_.call(this->volume_);
+  }
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+  const uint8_t pressed = this->buttons_pressed_.exchange(0, std::memory_order_acq_rel);
+  for (uint8_t i = 0; pressed != 0 && i < static_cast<uint8_t>(SpeakerButton::SPEAKER_BUTTON_NONE); i++) {
+    if ((pressed & (1 << i)) == 0)
+      continue;
+    work = true;
+    ESP_LOGD(TAG, "Speaker button: %s", SPEAKER_BUTTON_NAMES[i]);
+    if (this->speaker_buttons_event_ != nullptr)
+      this->speaker_buttons_event_->trigger(SPEAKER_BUTTON_NAMES[i]);
+  }
+#endif
+  return work;
 }
 
 void USBBluetooth::avrc_connected_(bool connected) {
@@ -1043,6 +1099,14 @@ bool USBBluetooth::a2dp_setup_() {
   // AVRCP for the speaker's volume (absolute volume, AVRCP 1.4); initialised before A2DP, as in the ESP-IDF example
   esp_avrc_ct_register_callback(avrc_ct_event);
   esp_avrc_ct_init();
+#ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
+  // The target side receives the speaker's buttons; every pass-through command Bluedroid allows is accepted
+  esp_avrc_tg_register_callback(avrc_tg_event);
+  esp_avrc_tg_init();
+  esp_avrc_psth_bit_mask_t commands{};
+  esp_avrc_tg_get_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_ALLOWED_CMD, &commands);
+  esp_avrc_tg_set_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_SUPPORTED_CMD, &commands);
+#endif
   esp_a2d_register_callback(a2dp_event);
   esp_a2d_source_register_data_callback(a2dp_data);
   err = esp_a2d_source_init();
