@@ -7,11 +7,10 @@ from esphome.const import CONF_ID
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
-from . import CONF_A2DP_SPEAKER, DOMAIN, USBBluetooth
+from . import CONF_A2DP_SPEAKER, CONF_USB_BLUETOOTH_ID, DOMAIN, USBBluetooth
 
 DEPENDENCIES = [DOMAIN]
 
-CONF_USB_BLUETOOTH_ID = "usb_bluetooth_id"
 CONF_CONNECTED_SPEAKER = "connected_speaker"
 
 ICON_SPEAKER_BLUETOOTH = "mdi:speaker-bluetooth"

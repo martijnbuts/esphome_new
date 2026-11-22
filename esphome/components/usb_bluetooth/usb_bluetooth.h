@@ -12,6 +12,9 @@
 #include <span>
 #include <vector>
 
+#ifdef USE_USB_BLUETOOTH_A2DP
+#include "a2dp_logic.h"
+#endif
 #if defined(USE_USB_BLUETOOTH_A2DP) && defined(USE_TEXT_SENSOR)
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
@@ -63,16 +66,6 @@ class USBBluetooth final : public usb_host::USBClient {
   void hci_attach(const ::esp_bluedroid_hci_driver_callbacks *callbacks);
 #endif
 #ifdef USE_USB_BLUETOOTH_A2DP
-  enum A2dpState : uint8_t {
-    A2DP_IDLE,
-    A2DP_CONNECTING,
-    A2DP_CONNECTED,
-    A2DP_READY,
-    A2DP_STARTING,
-    A2DP_STREAMING,
-    A2DP_SUSPENDING,
-    A2DP_SUSPENDED,
-  };
   /// The A2DP sink (speaker) to connect to and stream to, as a 48-bit address.
   void set_a2dp_speaker(uint64_t address);
   /// The speaker volume, 0..1: sent to the speaker over AVRCP (absolute volume), or applied to the samples.
@@ -190,7 +183,7 @@ class USBBluetooth final : public usb_host::USBClient {
   bool a2dp_setup_();
   // Classic Bluetooth set up for the current run of Bluedroid; cleared when Bluetooth stops
   bool a2dp_up_{false};
-  std::atomic<uint8_t> a2dp_state_{A2DP_IDLE};
+  std::atomic<A2dpState> a2dp_state_{A2DP_IDLE};
   uint8_t a2dp_peer_[6]{};
   uint32_t a2dp_last_try_{0};
   // When audio was last wanted, so the stream is suspended a while after it stops

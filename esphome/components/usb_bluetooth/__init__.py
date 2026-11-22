@@ -38,6 +38,7 @@ MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
 CONF_A2DP_SPEAKER = "a2dp_speaker"
+CONF_USB_BLUETOOTH_ID = "usb_bluetooth_id"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control

@@ -17,7 +17,6 @@
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 #include "esp_gap_bt_api.h"
-#include <cmath>
 #endif
 #ifdef USE_USB_BLUETOOTH_SPEAKER
 #include "speaker/usb_bluetooth_speaker.h"
@@ -725,13 +724,10 @@ void USBBluetooth::finish_probe_(bool ok) {
 #ifdef USE_USB_BLUETOOTH_A2DP
 static constexpr uint32_t A2DP_POLL_ID = 1;
 static constexpr uint32_t A2DP_POLL_MS = 1000;
-static constexpr uint32_t A2DP_RETRY_MS = 10000;
-static constexpr uint32_t A2DP_SUSPEND_AFTER_MS = 3000;
 // AVRCP transaction labels, one per kind of command
 static constexpr uint8_t TL_CAPS = 0;
 static constexpr uint8_t TL_VOLUME_NOTIFY = 1;
 static constexpr uint8_t TL_SET_VOLUME = 2;
-static constexpr uint8_t AVRC_VOLUME_MAX = 0x7F;
 
 // Bluedroid's callbacks have no user pointer; one dongle runs Bluedroid
 static USBBluetooth *g_a2dp = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
@@ -787,9 +783,7 @@ void USBBluetooth::a2dp_fill_(int16_t *frames, size_t count) {
     memset(frames, 0, count * 4);
   } else if (this->a2dp_gain_ < 0.999f) {
     // A speaker without absolute volume: scale the samples
-    const float gain = this->a2dp_gain_;
-    for (size_t i = 0; i < 2 * count; i++)
-      frames[i] = static_cast<int16_t>(frames[i] * gain);
+    a2dp_scale(frames, 2 * count, this->a2dp_gain_);
   }
 }
 
@@ -844,10 +838,7 @@ void USBBluetooth::publish_connected_speaker_() {
   char text[sizeof(this->speaker_name_buf_) + 24] = "";
   if (this->a2dp_connected()) {
     LockGuard guard(this->speaker_lock_);
-    const uint8_t *a = this->speaker_address_;
-    snprintf(text, sizeof(text), "%s%s%02X:%02X:%02X:%02X:%02X:%02X%s", this->speaker_name_buf_,
-             this->speaker_name_buf_[0] != 0 ? " (" : "", a[0], a[1], a[2], a[3], a[4], a[5],
-             this->speaker_name_buf_[0] != 0 ? ")" : "");
+    format_speaker(text, sizeof(text), this->speaker_name_buf_, this->speaker_address_);
   }
   this->connected_speaker_text_sensor_->publish_state(text);
 }
@@ -909,16 +900,14 @@ void USBBluetooth::avrc_absolute_volume_(bool supported) {
   if (supported) {
     esp_avrc_ct_send_register_notification_cmd(TL_VOLUME_NOTIFY, ESP_AVRC_RN_VOLUME_CHANGE, 0);
     // Before anything plays, set the speaker to the current level
-    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME,
-                                             static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX)));
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME, avrc_volume(this->volume_));
   }
 }
 
 void USBBluetooth::set_volume(float level) {
   this->volume_ = std::clamp(level, 0.0f, 1.0f);
   if (this->avrc_abs_volume_.load(std::memory_order_acquire)) {
-    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME,
-                                             static_cast<uint8_t>(lroundf(this->volume_ * AVRC_VOLUME_MAX)));
+    esp_avrc_ct_send_set_absolute_volume_cmd(TL_SET_VOLUME, avrc_volume(this->volume_));
   } else {
     this->a2dp_gain_ = this->volume_;
   }
@@ -988,42 +977,30 @@ void USBBluetooth::a2dp_poll_() {
 #endif
   if (wanted)
     this->a2dp_last_wanted_ = now;
-  switch (this->a2dp_state_.load(std::memory_order_acquire)) {
-    case A2DP_IDLE:
-      if (this->a2dp_last_try_ != 0 && now - this->a2dp_last_try_ < A2DP_RETRY_MS)
-        return;
+  const A2dpState state = this->a2dp_state_.load(std::memory_order_acquire);
+  const A2dpStep step = a2dp_step(state, wanted, now, this->a2dp_last_try_, this->a2dp_last_wanted_);
+  switch (step.action) {
+    case A2dpAction::A2DP_ACTION_CONNECT:
       this->a2dp_last_try_ = now == 0 ? 1 : now;
-      if (esp_a2d_source_connect(this->a2dp_peer_) == ESP_OK)
-        this->a2dp_state_.store(A2DP_CONNECTING, std::memory_order_release);
-      return;
-    case A2DP_CONNECTING:
-      // No answer: start over
-      if (now - this->a2dp_last_try_ > 3 * A2DP_RETRY_MS)
-        this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
-      return;
-    case A2DP_CONNECTED:
-      // Only stream when there is something to play; the speaker is set up for media once this is acknowledged
-      if (wanted)
-        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
-      return;
-    case A2DP_SUSPENDED:
-      if (wanted)
-        this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
-      return;
-    case A2DP_READY:
-      this->a2dp_state_.store(A2DP_STARTING, std::memory_order_release);
+      if (esp_a2d_source_connect(this->a2dp_peer_) != ESP_OK)
+        return;
+      break;
+    case A2dpAction::A2DP_ACTION_CHECK_READY:
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      break;
+    case A2dpAction::A2DP_ACTION_START:
       esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
-      return;
-    case A2DP_STREAMING:
-      // Nothing to play for a while: suspend; the connection stays and the speaker can go idle
-      if (!wanted && now - this->a2dp_last_wanted_ > A2DP_SUSPEND_AFTER_MS) {
-        this->a2dp_state_.store(A2DP_SUSPENDING, std::memory_order_release);
-        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
-      }
-      return;
-    default:
-      return;
+      break;
+    case A2dpAction::A2DP_ACTION_SUSPEND:
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+      break;
+    case A2dpAction::A2DP_ACTION_NONE:
+      break;
   }
+  // Bluedroid's task may have moved the state on meanwhile; its state wins
+  A2dpState expected = state;
+  if (step.state != state)
+    this->a2dp_state_.compare_exchange_strong(expected, step.state, std::memory_order_acq_rel);
 }
 #endif
 

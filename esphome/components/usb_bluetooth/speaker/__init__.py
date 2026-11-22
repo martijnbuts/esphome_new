@@ -13,12 +13,17 @@ from esphome.const import (
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
-from .. import CONF_A2DP_SPEAKER, DOMAIN, USBBluetooth, usb_bluetooth_ns
+from .. import (
+    CONF_A2DP_SPEAKER,
+    CONF_USB_BLUETOOTH_ID,
+    DOMAIN,
+    USBBluetooth,
+    usb_bluetooth_ns,
+)
 
 AUTO_LOAD = ["audio", "ring_buffer"]
 DEPENDENCIES = ["usb_bluetooth"]
 
-CONF_USB_BLUETOOTH_ID = "usb_bluetooth_id"
 
 # A2DP with the SBC codec in Bluedroid takes 16-bit stereo at 44.1 kHz
 A2DP_SAMPLE_RATE = 44100
