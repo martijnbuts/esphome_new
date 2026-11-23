@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace esphome::usb_bluetooth {
 
@@ -138,10 +139,17 @@ inline SpeakerButton speaker_button(uint8_t key_code) {
 /// The level from 0 to 1 of an AVRCP absolute volume (0..127).
 inline float avrc_level(uint8_t volume) { return std::min<uint8_t>(volume, AVRC_VOLUME_MAX) / float(AVRC_VOLUME_MAX); }
 
+/// Signal strength of a search result that carried none; sorts below every real value.
+static constexpr int8_t RSSI_UNKNOWN = -128;
+
 /// A device found by a search for speakers.
 struct FoundSpeaker {
   uint8_t address[6];
   char name[32];
+  /// Signal strength of the first result that carried one, in dBm
+  int8_t rssi;
+  /// Its name has been asked for after the search (it did not send one itself)
+  bool name_requested;
 };
 
 /// Devices kept from one search.
@@ -153,23 +161,63 @@ inline bool is_audio_device(uint32_t cod) {
   return ((cod >> 8) & 0x1F) == MAJOR_AUDIO_VIDEO;
 }
 
-/// Add a device to the found list, or fill in its name; true when the list changed. Devices past max are dropped.
-inline bool add_found_speaker(FoundSpeaker *list, uint8_t &count, uint8_t max, const uint8_t *address,
-                              const char *name) {
+/// Add a device to the found list, or fill in its name or signal strength; true when the list changed.
+/// The list stays sorted by signal strength, strongest (nearest) first. A full list gives its weakest place to a
+/// stronger device. The first signal strength of a device is kept, so the order does not change while the
+/// device keeps answering during the search.
+inline bool add_found_speaker(FoundSpeaker *list, uint8_t &count, uint8_t max, const uint8_t *address, const char *name,
+                              int8_t rssi = RSSI_UNKNOWN) {
+  uint8_t index = count;
   for (uint8_t i = 0; i < count; i++) {
-    if (memcmp(list[i].address, address, sizeof(list[i].address)) != 0)
-      continue;
-    if (name[0] == 0 || strncmp(list[i].name, name, sizeof(list[i].name) - 1) == 0)
-      return false;
-    snprintf(list[i].name, sizeof(list[i].name), "%s", name);
-    return true;
+    if (memcmp(list[i].address, address, sizeof(list[i].address)) == 0) {
+      index = i;
+      break;
+    }
   }
-  if (count >= max)
-    return false;
-  memcpy(list[count].address, address, sizeof(list[count].address));
-  snprintf(list[count].name, sizeof(list[count].name), "%s", name);
-  count++;
+  if (index < count) {
+    bool changed = false;
+    if (name[0] != 0 && strncmp(list[index].name, name, sizeof(list[index].name) - 1) != 0) {
+      snprintf(list[index].name, sizeof(list[index].name), "%s", name);
+      changed = true;
+    }
+    if (rssi != RSSI_UNKNOWN && list[index].rssi == RSSI_UNKNOWN) {
+      list[index].rssi = rssi;
+      changed = true;
+    }
+    if (!changed)
+      return false;
+  } else {
+    if (count < max) {
+      index = count++;
+    } else if (max > 0 && rssi > list[count - 1].rssi) {
+      index = count - 1;
+    } else {
+      return false;
+    }
+    memcpy(list[index].address, address, sizeof(list[index].address));
+    snprintf(list[index].name, sizeof(list[index].name), "%s", name);
+    list[index].rssi = rssi;
+    list[index].name_requested = false;
+  }
+  // Move the changed entry to its place
+  while (index > 0 && list[index - 1].rssi < list[index].rssi) {
+    std::swap(list[index - 1], list[index]);
+    index--;
+  }
+  while (index + 1 < count && list[index + 1].rssi > list[index].rssi) {
+    std::swap(list[index + 1], list[index]);
+    index++;
+  }
   return true;
+}
+
+/// The first found device without a name that has not been asked for its name yet, or nullptr.
+inline FoundSpeaker *next_unnamed_speaker(FoundSpeaker *list, uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (list[i].name[0] == 0 && !list[i].name_requested)
+      return &list[i];
+  }
+  return nullptr;
 }
 
 }  // namespace esphome::usb_bluetooth
