@@ -749,18 +749,24 @@ static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p
       break;
     }
     case ESP_BT_GAP_READ_REMOTE_NAME_EVT:
-      if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS && g_a2dp != nullptr)
-        g_a2dp->speaker_name_(param->read_rmt_name.bda, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name));
+      if (g_a2dp != nullptr) {
+        const bool ok = param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS;
+        g_a2dp->remote_name_(param->read_rmt_name.bda,
+                             ok ? reinterpret_cast<const char *>(param->read_rmt_name.rmt_name) : "");
+      }
       break;
     case ESP_BT_GAP_DISC_RES_EVT: {
       if (g_a2dp == nullptr)
         break;
       uint32_t cod = 0;
+      int8_t rssi = RSSI_UNKNOWN;
       char name[ESP_BT_GAP_MAX_BDNAME_LEN + 1] = "";
       for (int i = 0; i < param->disc_res.num_prop; i++) {
         const esp_bt_gap_dev_prop_t &prop = param->disc_res.prop[i];
         if (prop.type == ESP_BT_GAP_DEV_PROP_COD) {
           cod = *static_cast<uint32_t *>(prop.val);
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_RSSI) {
+          rssi = *static_cast<int8_t *>(prop.val);
         } else if (prop.type == ESP_BT_GAP_DEV_PROP_BDNAME && name[0] == 0) {
           snprintf(name, sizeof(name), "%.*s", prop.len, static_cast<const char *>(prop.val));
         } else if (prop.type == ESP_BT_GAP_DEV_PROP_EIR && name[0] == 0) {
@@ -773,7 +779,7 @@ static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p
             snprintf(name, sizeof(name), "%.*s", len, reinterpret_cast<const char *>(found));
         }
       }
-      g_a2dp->found_speaker_(param->disc_res.bda, cod, name);
+      g_a2dp->found_speaker_(param->disc_res.bda, cod, name, rssi);
       break;
     }
     case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
@@ -1007,25 +1013,70 @@ uint8_t USBBluetooth::found_speakers(FoundSpeaker *out) {
 }
 
 // Bluedroid's BTC task
-void USBBluetooth::found_speaker_(const uint8_t *address, uint32_t cod, const char *name) {
+void USBBluetooth::found_speaker_(const uint8_t *address, uint32_t cod, const char *name, int8_t rssi) {
   if (!is_audio_device(cod))
     return;
   bool changed;
   {
     LockGuard guard(this->found_lock_);
-    changed = add_found_speaker(this->found_, this->found_count_, MAX_FOUND_SPEAKERS, address, name);
+    changed = add_found_speaker(this->found_, this->found_count_, MAX_FOUND_SPEAKERS, address, name, rssi);
   }
   if (changed) {
-    ESP_LOGD(TAG, "Found %02X:%02X:%02X:%02X:%02X:%02X '%s'", address[0], address[1], address[2], address[3],
-             address[4], address[5], name);
+    ESP_LOGD(TAG, "Found %02X:%02X:%02X:%02X:%02X:%02X '%s' (%d dBm)", address[0], address[1], address[2], address[3],
+             address[4], address[5], name, rssi);
     this->found_changed_.store(true, std::memory_order_release);
   }
 }
 
 // Bluedroid's BTC task
 void USBBluetooth::scan_state_(bool running) {
-  this->scanning_.store(running, std::memory_order_release);
+  if (running) {
+    this->name_pending_ = false;
+    this->scanning_.store(true, std::memory_order_release);
+  } else if (!this->name_pending_ && !this->request_next_name_()) {
+    // Devices that sent no name are asked for it first; the search ends when they have answered
+    this->scanning_.store(false, std::memory_order_release);
+  }
   this->found_changed_.store(true, std::memory_order_release);
+}
+
+// Bluedroid's BTC task. Asks the next found device without a name for it, one at a time (Bluedroid runs one
+// name request at a time); false when none is left.
+bool USBBluetooth::request_next_name_() {
+  while (true) {
+    {
+      LockGuard guard(this->found_lock_);
+      FoundSpeaker *next = next_unnamed_speaker(this->found_, this->found_count_);
+      if (next == nullptr)
+        return false;
+      next->name_requested = true;
+      memcpy(this->name_pending_address_, next->address, sizeof(this->name_pending_address_));
+    }
+    if (esp_bt_gap_read_remote_name(this->name_pending_address_) == ESP_OK) {
+      this->name_pending_ = true;
+      return true;
+    }
+  }
+}
+
+// Bluedroid's BTC task: the answer to a name request, empty when the device did not answer
+void USBBluetooth::remote_name_(const uint8_t *address, const char *name) {
+  if (this->name_pending_ && memcmp(address, this->name_pending_address_, sizeof(this->name_pending_address_)) == 0) {
+    this->name_pending_ = false;
+    if (name[0] != 0) {
+      ESP_LOGD(TAG, "Name of %02X:%02X:%02X:%02X:%02X:%02X: '%s'", address[0], address[1], address[2], address[3],
+               address[4], address[5], name);
+      LockGuard guard(this->found_lock_);
+      add_found_speaker(this->found_, this->found_count_, MAX_FOUND_SPEAKERS, address, name);
+    }
+    if (!this->request_next_name_()) {
+      this->scanning_.store(false, std::memory_order_release);
+      this->found_changed_.store(true, std::memory_order_release);
+    }
+    return;
+  }
+  if (name[0] != 0 && memcmp(address, this->a2dp_peer_, sizeof(this->a2dp_peer_)) == 0)
+    this->speaker_name_(address, name);
 }
 
 // Main loop. Bluedroid forgets the Classic callbacks and profiles when esp32_ble takes it down (dongle unplugged,
@@ -1079,6 +1130,8 @@ void USBBluetooth::a2dp_poll_() {
       this->speaker_changed_.store(true, std::memory_order_release);
     this->a2dp_up_ = false;
     this->scanning_.store(false, std::memory_order_release);
+    // Bluedroid is down, so no answer to a name request comes any more
+    this->name_pending_ = false;
     this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
     return;
   }

@@ -108,8 +108,10 @@ class USBBluetooth final : public usb_host::USBClient {
   void a2dp_connection_(int state, const uint8_t *address);
   void a2dp_media_ack_(int cmd, int status);
   void speaker_name_(const uint8_t *address, const char *name);
-  void found_speaker_(const uint8_t *address, uint32_t cod, const char *name);
+  void found_speaker_(const uint8_t *address, uint32_t cod, const char *name, int8_t rssi);
   void scan_state_(bool running);
+  bool request_next_name_();
+  void remote_name_(const uint8_t *address, const char *name);
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(connected_speaker)
 #endif
@@ -237,6 +239,9 @@ class USBBluetooth final : public usb_host::USBClient {
   uint8_t found_count_{0};
   std::atomic<bool> found_changed_{false};
   std::atomic<bool> scanning_{false};
+  // Name request after a search; only used on Bluedroid's BTC task
+  uint8_t name_pending_address_[6]{};
+  bool name_pending_{false};
 #endif
 
   uint32_t fragment_{0};

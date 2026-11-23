@@ -175,4 +175,69 @@ TEST(AddFoundSpeaker, LongNameIsCut) {
   EXPECT_EQ(strlen(list[0].name), sizeof(list[0].name) - 1);
 }
 
+static const uint8_t RADIO_ADDRESS[6] = {0xE0, 0x17, 0xDE, 0xD3, 0x59, 0x79};
+
+TEST(AddFoundSpeaker, StrongestSignalFirst) {
+  FoundSpeaker list[3]{};
+  uint8_t count = 0;
+  EXPECT_TRUE(add_found_speaker(list, count, 3, SPEAKER_ADDRESS, "SBL 4 A2", -80));
+  EXPECT_TRUE(add_found_speaker(list, count, 3, RADIO_ADDRESS, "TCL-212BT", -45));
+  EXPECT_TRUE(add_found_speaker(list, count, 3, OTHER_ADDRESS, "", RSSI_UNKNOWN));
+  ASSERT_EQ(count, 3);
+  EXPECT_EQ(memcmp(list[0].address, RADIO_ADDRESS, 6), 0);
+  EXPECT_EQ(memcmp(list[1].address, SPEAKER_ADDRESS, 6), 0);
+  EXPECT_EQ(memcmp(list[2].address, OTHER_ADDRESS, 6), 0);
+}
+
+TEST(AddFoundSpeaker, KeepsTheFirstSignalStrength) {
+  FoundSpeaker list[2]{};
+  uint8_t count = 0;
+  add_found_speaker(list, count, 2, SPEAKER_ADDRESS, "SBL 4 A2", -80);
+  add_found_speaker(list, count, 2, RADIO_ADDRESS, "TCL-212BT", -60);
+  // A later answer of the same device does not reorder the list during the search
+  EXPECT_FALSE(add_found_speaker(list, count, 2, SPEAKER_ADDRESS, "SBL 4 A2", -40));
+  EXPECT_EQ(memcmp(list[0].address, RADIO_ADDRESS, 6), 0);
+  EXPECT_EQ(list[1].rssi, -80);
+  // A device first seen without a signal strength gets its place once one arrives
+  FoundSpeaker other[2]{};
+  uint8_t other_count = 0;
+  add_found_speaker(other, other_count, 2, SPEAKER_ADDRESS, "SBL 4 A2");
+  add_found_speaker(other, other_count, 2, RADIO_ADDRESS, "TCL-212BT", -60);
+  EXPECT_TRUE(add_found_speaker(other, other_count, 2, SPEAKER_ADDRESS, "", -30));
+  EXPECT_EQ(memcmp(other[0].address, SPEAKER_ADDRESS, 6), 0);
+}
+
+TEST(AddFoundSpeaker, FullListGivesTheWeakestPlaceToAStrongerDevice) {
+  FoundSpeaker list[2]{};
+  uint8_t count = 0;
+  add_found_speaker(list, count, 2, SPEAKER_ADDRESS, "SBL 4 A2", -50);
+  add_found_speaker(list, count, 2, OTHER_ADDRESS, "Far away", -90);
+  EXPECT_TRUE(add_found_speaker(list, count, 2, RADIO_ADDRESS, "TCL-212BT", -70));
+  ASSERT_EQ(count, 2);
+  EXPECT_EQ(memcmp(list[0].address, SPEAKER_ADDRESS, 6), 0);
+  EXPECT_EQ(memcmp(list[1].address, RADIO_ADDRESS, 6), 0);
+  // A weaker device than all of them is left out
+  EXPECT_FALSE(add_found_speaker(list, count, 2, OTHER_ADDRESS, "Far away", -95));
+}
+
+TEST(NextUnnamedSpeaker, EachDeviceWithoutANameIsAskedOnce) {
+  FoundSpeaker list[3]{};
+  uint8_t count = 0;
+  add_found_speaker(list, count, 3, SPEAKER_ADDRESS, "SBL 4 A2", -50);
+  add_found_speaker(list, count, 3, RADIO_ADDRESS, "", -60);
+  add_found_speaker(list, count, 3, OTHER_ADDRESS, "", -70);
+  FoundSpeaker *next = next_unnamed_speaker(list, count);
+  ASSERT_NE(next, nullptr);
+  EXPECT_EQ(memcmp(next->address, RADIO_ADDRESS, 6), 0);
+  next->name_requested = true;
+  // The radio answers with its name
+  EXPECT_TRUE(add_found_speaker(list, count, 3, RADIO_ADDRESS, "TCL-212BT"));
+  next = next_unnamed_speaker(list, count);
+  ASSERT_NE(next, nullptr);
+  EXPECT_EQ(memcmp(next->address, OTHER_ADDRESS, 6), 0);
+  // This one does not answer; it is not asked again
+  next->name_requested = true;
+  EXPECT_EQ(next_unnamed_speaker(list, count), nullptr);
+}
+
 }  // namespace esphome::usb_bluetooth::testing
