@@ -25,6 +25,9 @@
 #ifdef USE_USB_BLUETOOTH_SPEAKER_SELECT
 #include "select/usb_bluetooth_speaker_select.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
+#include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
+#endif
 
 namespace esphome::usb_bluetooth {
 
@@ -851,12 +854,17 @@ void USBBluetooth::a2dp_connection_(int state, const uint8_t *address) {
       return;
     }
     this->a2dp_state_.store(A2DP_CONNECTED, std::memory_order_release);
+    this->a2dp_failures_.store(0, std::memory_order_release);
     this->speaker_name_(address, "");
     // The name arrives as ESP_BT_GAP_READ_REMOTE_NAME_EVT
     esp_bt_gap_read_remote_name(const_cast<uint8_t *>(address));
   } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-    ESP_LOGI(TAG, "Speaker disconnected");
-    this->a2dp_state_.store(A2DP_IDLE, std::memory_order_release);
+    // A disconnect while connecting is a failed attempt: the speaker is off or out of range
+    if (this->a2dp_state_.exchange(A2DP_IDLE, std::memory_order_acq_rel) == A2DP_CONNECTING) {
+      this->count_a2dp_failure_();
+    } else {
+      ESP_LOGI(TAG, "Speaker disconnected");
+    }
     this->speaker_changed_.store(true, std::memory_order_release);
   }
 }
@@ -1061,6 +1069,7 @@ void USBBluetooth::set_a2dp_peer(const uint8_t *address) {
   memcpy(previous, this->a2dp_peer_, sizeof(previous));
   memcpy(this->a2dp_peer_, address, sizeof(this->a2dp_peer_));
   this->a2dp_last_try_ = 0;
+  this->a2dp_failures_.store(0, std::memory_order_release);
   ESP_LOGI(TAG, "Speaker set to %02X:%02X:%02X:%02X:%02X:%02X", address[0], address[1], address[2], address[3],
            address[4], address[5]);
   // The disconnect event sets A2DP_IDLE, and the next poll connects to the new speaker
@@ -1206,6 +1215,56 @@ bool USBBluetooth::a2dp_setup_() {
 
 // Main loop
 void USBBluetooth::a2dp_poll_() {
+  this->a2dp_poll_step_();
+  const A2dpState state = this->a2dp_state_.load(std::memory_order_acquire);
+#ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
+  this->pause_ble_scan_(this->a2dp_up_ && ble_scan_paused(this->ble_scan_pause_, state, this->scanning()));
+#endif
+#ifdef USE_TEXT_SENSOR
+  if (this->speaker_status_text_sensor_ != nullptr) {
+    static constexpr uint8_t NO_PEER[6]{};
+    const bool chosen = memcmp(this->a2dp_peer_, NO_PEER, sizeof(this->a2dp_peer_)) != 0;
+    const auto status = static_cast<uint8_t>(
+        speaker_status(state, chosen, this->scanning(), this->a2dp_failures_.load(std::memory_order_acquire)));
+    if (status != this->speaker_status_) {
+      this->speaker_status_ = status;
+      this->speaker_status_text_sensor_->publish_state(SPEAKER_STATUS_NAMES[status]);
+    }
+  }
+#endif
+}
+
+// Bluedroid's BTC task, or the main loop for an attempt that got no answer
+void USBBluetooth::count_a2dp_failure_() {
+  uint8_t failures = this->a2dp_failures_.load(std::memory_order_acquire);
+  if (failures < A2DP_MAX_FAILURES)
+    this->a2dp_failures_.store(++failures, std::memory_order_release);
+  ESP_LOGI(TAG, "Speaker not reachable; next try in %" PRIu32 " s", a2dp_retry_ms(failures) / 1000);
+}
+
+#ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
+// Main loop. Only a running scan is stopped, and only that one is started again, so a scan that was
+// switched off stays off.
+void USBBluetooth::pause_ble_scan_(bool pause) {
+  auto *tracker = esp32_ble_tracker::global_esp32_ble_tracker;
+  if (tracker == nullptr || pause == this->ble_scan_paused_)
+    return;
+  if (pause) {
+    // Between two scan windows the scanner is idle for a moment; the next poll tries again
+    if (!tracker->scan_running())
+      return;
+    ESP_LOGD(TAG, "BLE scan paused for Classic Bluetooth");
+    tracker->stop_scan();
+  } else {
+    ESP_LOGD(TAG, "BLE scan resumed");
+    // The tracker starts it again once it is idle
+    tracker->set_scan_continuous(true);
+  }
+  this->ble_scan_paused_ = pause;
+}
+#endif
+
+void USBBluetooth::a2dp_poll_step_() {
   if (this->speaker_changed_.exchange(false, std::memory_order_acq_rel)) {
 #ifdef USE_TEXT_SENSOR
     this->publish_connected_speaker_();
@@ -1246,7 +1305,8 @@ void USBBluetooth::a2dp_poll_() {
   // A connection attempt during a search fails, as the radio is busy with the search
   const bool may_connect = !this->scanning() && memcmp(this->a2dp_peer_, NO_PEER, sizeof(this->a2dp_peer_)) != 0;
   const A2dpState state = this->a2dp_state_.load(std::memory_order_acquire);
-  const A2dpStep step = a2dp_step(state, wanted, may_connect, now, this->a2dp_last_try_, this->a2dp_last_wanted_);
+  const A2dpStep step = a2dp_step(state, wanted, may_connect, now, this->a2dp_last_try_, this->a2dp_last_wanted_,
+                                  this->a2dp_failures_.load(std::memory_order_acquire));
   switch (step.action) {
     case A2dpAction::A2DP_ACTION_CONNECT:
       this->a2dp_last_try_ = now == 0 ? 1 : now;
@@ -1267,8 +1327,12 @@ void USBBluetooth::a2dp_poll_() {
   }
   // Bluedroid's task may have moved the state on meanwhile; its state wins
   A2dpState expected = state;
-  if (step.state != state)
-    this->a2dp_state_.compare_exchange_strong(expected, step.state, std::memory_order_acq_rel);
+  if (step.state != state &&
+      this->a2dp_state_.compare_exchange_strong(expected, step.state, std::memory_order_acq_rel) &&
+      state == A2DP_CONNECTING) {
+    // The connection attempt got no answer at all
+    this->count_a2dp_failure_();
+  }
 }
 #endif
 

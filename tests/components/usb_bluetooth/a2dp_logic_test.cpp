@@ -275,4 +275,80 @@ TEST(NextUnnamedSpeaker, EachDeviceWithoutANameIsAskedOnce) {
   EXPECT_EQ(next_unnamed_speaker(list, count), nullptr);
 }
 
+TEST(A2dpRetry, BacksOffWhileTheSpeakerStaysOff) {
+  EXPECT_EQ(a2dp_retry_ms(0), 10000u);
+  EXPECT_EQ(a2dp_retry_ms(1), 10000u);
+  EXPECT_EQ(a2dp_retry_ms(2), 20000u);
+  EXPECT_EQ(a2dp_retry_ms(3), 40000u);
+  EXPECT_EQ(a2dp_retry_ms(4), 60000u);
+  EXPECT_EQ(a2dp_retry_ms(A2DP_MAX_FAILURES), 60000u);
+}
+
+TEST(A2dpRetry, StepWaitsLongerAfterFailures) {
+  // 30 s after the last try: soon enough after 2 failures (20 s), not after 3 (40 s)
+  EXPECT_EQ(a2dp_step(A2DP_IDLE, false, true, 31000, 1000, 0, 2).action, A2dpAction::A2DP_ACTION_CONNECT);
+  EXPECT_EQ(a2dp_step(A2DP_IDLE, false, true, 31000, 1000, 0, 3).action, A2dpAction::A2DP_ACTION_NONE);
+}
+
+TEST(A2dpRetry, AudioToPlayTriesSooner) {
+  // Something to play: the next try comes after 3 s, however often it failed
+  EXPECT_EQ(a2dp_step(A2DP_IDLE, true, true, 5000, 1000, 5000, A2DP_MAX_FAILURES).action,
+            A2dpAction::A2DP_ACTION_CONNECT);
+  EXPECT_EQ(a2dp_step(A2DP_IDLE, true, true, 3000, 1000, 3000, A2DP_MAX_FAILURES).action, A2dpAction::A2DP_ACTION_NONE);
+}
+
+struct StatusCase {
+  const char *name;
+  A2dpState state;
+  bool chosen;
+  bool searching;
+  uint8_t failures;
+  SpeakerStatus status;
+};
+
+static const StatusCase STATUS_CASES[] = {
+    {"none", A2DP_IDLE, false, false, 0, SpeakerStatus::SPEAKER_STATUS_NONE},
+    {"searching", A2DP_IDLE, false, true, 0, SpeakerStatus::SPEAKER_STATUS_SEARCHING},
+    {"searching_while_connected", A2DP_CONNECTED, true, true, 0, SpeakerStatus::SPEAKER_STATUS_SEARCHING},
+    {"first_try", A2DP_IDLE, true, false, 0, SpeakerStatus::SPEAKER_STATUS_CONNECTING},
+    {"connecting", A2DP_CONNECTING, true, false, 0, SpeakerStatus::SPEAKER_STATUS_CONNECTING},
+    {"not_reachable", A2DP_IDLE, true, false, 1, SpeakerStatus::SPEAKER_STATUS_NOT_REACHABLE},
+    {"retrying", A2DP_CONNECTING, true, false, 3, SpeakerStatus::SPEAKER_STATUS_NOT_REACHABLE},
+    {"connected", A2DP_CONNECTED, true, false, 0, SpeakerStatus::SPEAKER_STATUS_CONNECTED},
+    {"suspended", A2DP_SUSPENDED, true, false, 0, SpeakerStatus::SPEAKER_STATUS_CONNECTED},
+    {"playing", A2DP_STREAMING, true, false, 0, SpeakerStatus::SPEAKER_STATUS_PLAYING},
+    {"starting", A2DP_STARTING, true, false, 0, SpeakerStatus::SPEAKER_STATUS_PLAYING},
+};
+
+class SpeakerStatusTest : public ::testing::TestWithParam<StatusCase> {};
+
+TEST_P(SpeakerStatusTest, Status) {
+  const StatusCase &c = GetParam();
+  EXPECT_EQ(speaker_status(c.state, c.chosen, c.searching, c.failures), c.status);
+}
+
+INSTANTIATE_TEST_SUITE_P(UsbBluetooth, SpeakerStatusTest, ::testing::ValuesIn(STATUS_CASES),
+                         [](const ::testing::TestParamInfo<StatusCase> &info) { return std::string(info.param.name); });
+
+TEST(SpeakerStatusNames, OneNamePerStatus) {
+  EXPECT_EQ(sizeof(SPEAKER_STATUS_NAMES) / sizeof(SPEAKER_STATUS_NAMES[0]),
+            static_cast<size_t>(SpeakerStatus::SPEAKER_STATUS_PLAYING) + 1);
+  EXPECT_STREQ(SPEAKER_STATUS_NAMES[static_cast<uint8_t>(SpeakerStatus::SPEAKER_STATUS_NOT_REACHABLE)],
+               "Not reachable");
+}
+
+TEST(BleScanPaused, ByMode) {
+  constexpr auto never = BleScanPause::BLE_SCAN_PAUSE_NEVER;
+  constexpr auto connecting = BleScanPause::BLE_SCAN_PAUSE_CONNECTING;
+  constexpr auto streaming = BleScanPause::BLE_SCAN_PAUSE_STREAMING;
+  EXPECT_FALSE(ble_scan_paused(never, A2DP_CONNECTING, true));
+  EXPECT_TRUE(ble_scan_paused(connecting, A2DP_CONNECTING, false));
+  EXPECT_TRUE(ble_scan_paused(connecting, A2DP_IDLE, true));
+  EXPECT_FALSE(ble_scan_paused(connecting, A2DP_STREAMING, false));
+  EXPECT_FALSE(ble_scan_paused(connecting, A2DP_IDLE, false));
+  EXPECT_TRUE(ble_scan_paused(streaming, A2DP_STREAMING, false));
+  EXPECT_TRUE(ble_scan_paused(streaming, A2DP_SUSPENDING, false));
+  EXPECT_FALSE(ble_scan_paused(streaming, A2DP_SUSPENDED, false));
+  EXPECT_FALSE(ble_scan_paused(streaming, A2DP_CONNECTED, false));
+}
 }  // namespace esphome::usb_bluetooth::testing

@@ -39,23 +39,39 @@ struct A2dpStep {
   A2dpAction action;
 };
 
-/// Time between connection attempts while the speaker is off or out of range.
+/// Time between connection attempts while the speaker is off or out of range. It doubles with each failed attempt
+/// after the first, up to A2DP_RETRY_MAX_MS, so a speaker that stays off costs little radio time.
 static constexpr uint32_t A2DP_RETRY_MS = 10000;
+static constexpr uint32_t A2DP_RETRY_MAX_MS = 60000;
+/// Time between connection attempts while there is audio to play.
+static constexpr uint32_t A2DP_WANTED_RETRY_MS = 3000;
+/// Failed connection attempts are counted up to here.
+static constexpr uint8_t A2DP_MAX_FAILURES = 8;
 /// Time without audio before the stream is suspended (the connection stays).
 static constexpr uint32_t A2DP_SUSPEND_AFTER_MS = 3000;
 /// Highest AVRCP absolute volume.
 static constexpr uint8_t AVRC_VOLUME_MAX = 0x7F;
 
+/// Time to wait before the next connection attempt after this many failed ones in a row.
+inline uint32_t a2dp_retry_ms(uint8_t failures) {
+  if (failures <= 1)
+    return A2DP_RETRY_MS;
+  return std::min<uint32_t>(A2DP_RETRY_MS << std::min<uint8_t>(failures - 1, 3), A2DP_RETRY_MAX_MS);
+}
+
 /// One step of the A2DP state machine. wanted: there is audio to stream. may_connect: a speaker is chosen and no
 /// search is running. last_try: millis() of the last connection attempt, 0 for none yet. last_wanted: millis() when
-/// audio was last wanted. The caller does the action; a failed connection request keeps A2DP_IDLE.
+/// audio was last wanted. failures: failed connection attempts in a row. The caller does the action; a failed
+/// connection request keeps A2DP_IDLE.
 inline A2dpStep a2dp_step(A2dpState state, bool wanted, bool may_connect, uint32_t now, uint32_t last_try,
-                          uint32_t last_wanted) {
+                          uint32_t last_wanted, uint8_t failures = 0) {
   switch (state) {
-    case A2DP_IDLE:
-      if (!may_connect || (last_try != 0 && now - last_try < A2DP_RETRY_MS))
+    case A2DP_IDLE: {
+      const uint32_t wait = wanted ? A2DP_WANTED_RETRY_MS : a2dp_retry_ms(failures);
+      if (!may_connect || (last_try != 0 && now - last_try < wait))
         return {A2DP_IDLE, A2dpAction::A2DP_ACTION_NONE};
       return {A2DP_CONNECTING, A2dpAction::A2DP_ACTION_CONNECT};
+    }
     case A2DP_CONNECTING:
       // No answer: start over
       if (now - last_try > 3 * A2DP_RETRY_MS)
@@ -81,6 +97,52 @@ inline A2dpStep a2dp_step(A2dpState state, bool wanted, bool may_connect, uint32
       break;
   }
   return {state, A2dpAction::A2DP_ACTION_NONE};
+}
+
+/// What the speaker link is doing, for the speaker status text sensor.
+enum class SpeakerStatus : uint8_t {
+  SPEAKER_STATUS_NONE,
+  SPEAKER_STATUS_SEARCHING,
+  SPEAKER_STATUS_CONNECTING,
+  SPEAKER_STATUS_NOT_REACHABLE,
+  SPEAKER_STATUS_CONNECTED,
+  SPEAKER_STATUS_PLAYING,
+};
+
+/// The text of each SpeakerStatus.
+static constexpr const char *SPEAKER_STATUS_NAMES[] = {"No speaker",    "Searching", "Connecting",
+                                                       "Not reachable", "Connected", "Playing"};
+
+/// The status of the speaker link. chosen: a speaker is set. failures: failed connection attempts in a row; after
+/// one, the speaker counts as not reachable until it connects.
+inline SpeakerStatus speaker_status(A2dpState state, bool chosen, bool searching, uint8_t failures) {
+  if (searching)
+    return SpeakerStatus::SPEAKER_STATUS_SEARCHING;
+  if (state == A2DP_STARTING || state == A2DP_STREAMING)
+    return SpeakerStatus::SPEAKER_STATUS_PLAYING;
+  if (state >= A2DP_CONNECTED)
+    return SpeakerStatus::SPEAKER_STATUS_CONNECTED;
+  if (!chosen)
+    return SpeakerStatus::SPEAKER_STATUS_NONE;
+  return failures > 0 ? SpeakerStatus::SPEAKER_STATUS_NOT_REACHABLE : SpeakerStatus::SPEAKER_STATUS_CONNECTING;
+}
+
+/// When the BLE scan (esp32_ble_tracker, bluetooth_proxy) gives the radio to Classic Bluetooth.
+enum class BleScanPause : uint8_t {
+  BLE_SCAN_PAUSE_NEVER,
+  BLE_SCAN_PAUSE_CONNECTING,
+  BLE_SCAN_PAUSE_STREAMING,
+};
+
+/// Whether the BLE scan is paused: while connecting to the speaker or searching for speakers, and with
+/// BLE_SCAN_PAUSE_STREAMING also for as long as audio is streamed.
+inline bool ble_scan_paused(BleScanPause mode, A2dpState state, bool searching) {
+  if (mode == BleScanPause::BLE_SCAN_PAUSE_NEVER)
+    return false;
+  if (searching || state == A2DP_CONNECTING)
+    return true;
+  return mode == BleScanPause::BLE_SCAN_PAUSE_STREAMING &&
+         (state == A2DP_READY || state == A2DP_STARTING || state == A2DP_STREAMING || state == A2DP_SUSPENDING);
 }
 
 /// The AVRCP absolute volume (0..127) of a level from 0 to 1.

@@ -5,6 +5,7 @@ usb_host:
 usb_bluetooth:
   - id: usb_bt
     bluedroid: true
+    pause_ble_scan: streaming
     on_speaker_volume:
       - logger.log:
           format: "Speaker volume %.2f"
@@ -25,3 +26,8 @@ event:
   - platform: usb_bluetooth
     speaker_buttons:
       name: Speaker buttons
+
+text_sensor:
+  - platform: usb_bluetooth
+    speaker_status:
+      name: Speaker status

@@ -42,6 +42,7 @@ CONF_BLUEDROID = "bluedroid"
 CONF_A2DP_SPEAKER = "a2dp_speaker"
 CONF_USB_BLUETOOTH_ID = "usb_bluetooth_id"
 CONF_ON_SPEAKER_VOLUME = "on_speaker_volume"
+CONF_PAUSE_BLE_SCAN = "pause_ble_scan"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 
 # A Realtek download fragment is an HCI command of 3 + 1 + 252 bytes, sent as one control
@@ -55,6 +56,12 @@ MIN_TRANSFER_REQUESTS_BLUEDROID = 8
 
 usb_bluetooth_ns = cg.esphome_ns.namespace("usb_bluetooth")
 USBBluetooth = usb_bluetooth_ns.class_("USBBluetooth", USBClient)
+BleScanPause = usb_bluetooth_ns.enum("BleScanPause", is_class=True)
+BLE_SCAN_PAUSE = {
+    "never": BleScanPause.BLE_SCAN_PAUSE_NEVER,
+    "connecting": BleScanPause.BLE_SCAN_PAUSE_CONNECTING,
+    "streaming": BleScanPause.BLE_SCAN_PAUSE_STREAMING,
+}
 RealtekImage = USBBluetooth.class_("RealtekImage")
 
 
@@ -123,6 +130,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_A2DP_SPEAKER): cv.mac_address,
             # The volume was changed on the speaker itself; x is the level from 0 to 1
             cv.Optional(CONF_ON_SPEAKER_VOLUME): automation.validate_automation({}),
+            # When the BLE scan (esp32_ble_tracker, bluetooth_proxy) gives the radio to the speaker: while
+            # connecting and searching, while streaming too, or never
+            cv.Optional(CONF_PAUSE_BLE_SCAN): cv.enum(BLE_SCAN_PAUSE, lower=True),
         }
     ),
     _validate_firmware,
@@ -168,10 +178,9 @@ def _final_validate_bluedroid(config: ConfigType) -> ConfigType:
     if CONF_A2DP_SPEAKER in config and not config[CONF_BLUEDROID]:
         raise cv.Invalid(f"{CONF_A2DP_SPEAKER} needs {CONF_BLUEDROID}: true")
     full = fv.full_config.get()
-    if CONF_ON_SPEAKER_VOLUME in config and not uses_a2dp(config, full):
-        raise cv.Invalid(
-            f"{CONF_ON_SPEAKER_VOLUME} needs {CONF_A2DP_SPEAKER} or a speaker select"
-        )
+    for key in (CONF_ON_SPEAKER_VOLUME, CONF_PAUSE_BLE_SCAN):
+        if key in config and not uses_a2dp(config, full):
+            raise cv.Invalid(f"{key} needs {CONF_A2DP_SPEAKER} or a speaker select")
     if not config[CONF_BLUEDROID]:
         return config
     if "esp32_ble" not in full:
@@ -205,6 +214,10 @@ async def to_code(config: ConfigType) -> None:
                 cg.add(var.set_a2dp_speaker(speaker.as_hex))
             else:
                 cg.add(var.enable_a2dp())
+            pause = config.get(CONF_PAUSE_BLE_SCAN, "connecting")
+            if "esp32_ble_tracker" in CORE.config and pause != "never":
+                cg.add_define("USE_USB_BLUETOOTH_PAUSE_BLE_SCAN")
+                cg.add(var.set_ble_scan_pause(BLE_SCAN_PAUSE[pause]))
             for conf in config.get(CONF_ON_SPEAKER_VOLUME, []):
                 await automation.build_callback_automation(
                     var, "add_on_speaker_volume_callback", [(cg.float_, "x")], conf

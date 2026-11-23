@@ -117,6 +117,11 @@ class USBBluetooth final : public usb_host::USBClient {
   void remote_name_(const uint8_t *address, const char *name);
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(connected_speaker)
+  SUB_TEXT_SENSOR(speaker_status)
+#endif
+#ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
+  /// When the BLE scan pauses for Classic Bluetooth.
+  void set_ble_scan_pause(BleScanPause pause) { this->ble_scan_pause_ = pause; }
 #endif
 #ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
   /// The event entity for the buttons on the speaker.
@@ -220,7 +225,20 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_A2DP
   // Main loop, every second: set up Classic Bluetooth when esp32_ble becomes active, then keep the speaker connected
   void a2dp_poll_();
+  void a2dp_poll_step_();
   bool a2dp_setup_();
+  void count_a2dp_failure_();
+#ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
+  void pause_ble_scan_(bool pause);
+  BleScanPause ble_scan_pause_{BleScanPause::BLE_SCAN_PAUSE_CONNECTING};
+  bool ble_scan_paused_{false};
+#endif
+#ifdef USE_TEXT_SENSOR
+  // The SpeakerStatus last published; none yet at boot
+  uint8_t speaker_status_{0xFF};
+#endif
+  // Failed connection attempts in a row, written by Bluedroid's BTC task and the main loop
+  std::atomic<uint8_t> a2dp_failures_{0};
   // Classic Bluetooth set up for the current run of Bluedroid; cleared when Bluetooth stops
   bool a2dp_up_{false};
   std::atomic<A2dpState> a2dp_state_{A2DP_IDLE};
