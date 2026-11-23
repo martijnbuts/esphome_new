@@ -31,3 +31,8 @@ text_sensor:
   - platform: usb_bluetooth
     speaker_status:
       name: Speaker status
+
+sensor:
+  - platform: usb_bluetooth
+    speaker_signal:
+      name: Speaker signal

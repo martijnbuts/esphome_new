@@ -90,6 +90,22 @@ def test_speaker_status_text_sensor(
     assert "bt->set_speaker_status_text_sensor(" in main
 
 
+def test_speaker_signal_sensor(
+    tmp_path: Path, generate_main: Callable[[str | Path], str]
+) -> None:
+    main = generate_main(
+        _write(
+            tmp_path,
+            "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n"
+            "    a2dp_speaker: 4C:72:74:24:C8:05\n\n"
+            "sensor:\n  - platform: usb_bluetooth\n"
+            "    speaker_signal:\n      name: Speaker signal\n",
+        )
+    )
+    assert "bt->set_speaker_signal_sensor(" in main
+    assert "USE_USB_BLUETOOTH_SPEAKER_SIGNAL" in _defines()
+
+
 SPEAKER = "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n    a2dp_speaker: 4C:72:74:24:C8:05\n"
 
 
@@ -160,6 +176,13 @@ def test_pause_ble_scan_needs_a_tracker(
             "    speaker_status:\n      name: Speaker status\n",
             "speaker_status needs a2dp_speaker or a speaker select on the usb_bluetooth entry 'bt'",
             id="speaker_status_needs_a2dp_speaker",
+        ),
+        pytest.param(
+            "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n\n"
+            "sensor:\n  - platform: usb_bluetooth\n"
+            "    speaker_signal:\n      name: Speaker signal\n",
+            "speaker_signal needs a2dp_speaker or a speaker select on the usb_bluetooth entry 'bt'",
+            id="speaker_signal_needs_a2dp_speaker",
         ),
         pytest.param(
             "usb_bluetooth:\n  - id: bt\n    bluedroid: true\n    pause_ble_scan: streaming\n",

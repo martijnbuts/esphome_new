@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
@@ -756,6 +757,12 @@ static void a2dp_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p
       esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin);
       break;
     }
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+    case ESP_BT_GAP_READ_RSSI_DELTA_EVT:
+      if (g_a2dp != nullptr && param->read_rssi_delta.stat == ESP_BT_STATUS_SUCCESS)
+        g_a2dp->speaker_signal_(param->read_rssi_delta.rssi_delta);
+      break;
+#endif
     case ESP_BT_GAP_READ_REMOTE_NAME_EVT:
       if (g_a2dp != nullptr) {
         const bool ok = param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS;
@@ -1220,6 +1227,9 @@ void USBBluetooth::a2dp_poll_() {
 #ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
   this->pause_ble_scan_(this->a2dp_up_ && ble_scan_paused(this->ble_scan_pause_, state, this->scanning()));
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+  this->update_speaker_signal_(state >= A2DP_CONNECTED);
+#endif
 #ifdef USE_TEXT_SENSOR
   if (this->speaker_status_text_sensor_ != nullptr) {
     static constexpr uint8_t NO_PEER[6]{};
@@ -1233,6 +1243,28 @@ void USBBluetooth::a2dp_poll_() {
   }
 #endif
 }
+
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+// Main loop, every poll: ask for the signal of the connected speaker every SIGNAL_POLLS polls, and publish the
+// last answer; unknown while no speaker is connected.
+void USBBluetooth::update_speaker_signal_(bool connected) {
+  static constexpr uint8_t SIGNAL_POLLS = 10;
+  if (!connected) {
+    this->signal_polls_ = 0;
+    if (!std::isnan(this->speaker_signal_sensor_->state))
+      this->speaker_signal_sensor_->publish_state(NAN);
+    return;
+  }
+  const int16_t reported = this->reported_signal_.exchange(SIGNAL_NONE, std::memory_order_acq_rel);
+  if (reported != SIGNAL_NONE)
+    this->speaker_signal_sensor_->publish_state(reported);
+  if (this->signal_polls_++ % SIGNAL_POLLS == 0)
+    esp_bt_gap_read_rssi_delta(this->a2dp_peer_);
+}
+
+// Bluedroid's BTC task
+void USBBluetooth::speaker_signal_(int8_t rssi) { this->reported_signal_.store(rssi, std::memory_order_release); }
+#endif
 
 // Bluedroid's BTC task, or the main loop for an attempt that got no answer
 void USBBluetooth::count_a2dp_failure_() {

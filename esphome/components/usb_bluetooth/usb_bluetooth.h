@@ -18,6 +18,9 @@
 #if defined(USE_USB_BLUETOOTH_A2DP) && defined(USE_TEXT_SENSOR)
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+#include "esphome/components/sensor/sensor.h"
+#endif
 #ifdef USE_USB_BLUETOOTH_SPEAKER_BUTTONS
 #include "esphome/components/event/event.h"
 #endif
@@ -118,6 +121,11 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(connected_speaker)
   SUB_TEXT_SENSOR(speaker_status)
+#endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+  SUB_SENSOR(speaker_signal)
+  // Bluedroid's BTC task: the answer to a signal request
+  void speaker_signal_(int8_t rssi);
 #endif
 #ifdef USE_USB_BLUETOOTH_PAUSE_BLE_SCAN
   /// When the BLE scan pauses for Classic Bluetooth.
@@ -236,6 +244,13 @@ class USBBluetooth final : public usb_host::USBClient {
 #ifdef USE_TEXT_SENSOR
   // The SpeakerStatus last published; none yet at boot
   uint8_t speaker_status_{0xFF};
+#endif
+#ifdef USE_USB_BLUETOOTH_SPEAKER_SIGNAL
+  void update_speaker_signal_(bool connected);
+  static constexpr int16_t SIGNAL_NONE = INT16_MIN;
+  // The last signal the controller reported, SIGNAL_NONE once handed on
+  std::atomic<int16_t> reported_signal_{SIGNAL_NONE};
+  uint8_t signal_polls_{0};
 #endif
   // Failed connection attempts in a row, written by Bluedroid's BTC task and the main loop
   std::atomic<uint8_t> a2dp_failures_{0};
