@@ -1288,9 +1288,15 @@ void USBBluetooth::pause_ble_scan_(bool pause) {
     ESP_LOGD(TAG, "BLE scan paused for Classic Bluetooth");
     tracker->stop_scan();
   } else {
+    // The tracker only restarts a continuous scan when its state changes, and after the stop it is
+    // already idle: start it here, or it would stay off until the next reboot.
+    if (tracker->get_scanner_state() != esp32_ble_tracker::ScannerState::IDLE) {
+      // Still stopping: the next poll tries again
+      return;
+    }
     ESP_LOGD(TAG, "BLE scan resumed");
-    // The tracker starts it again once it is idle
     tracker->set_scan_continuous(true);
+    tracker->start_scan();
   }
   this->ble_scan_paused_ = pause;
 }
