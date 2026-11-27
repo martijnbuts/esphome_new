@@ -1,0 +1,15 @@
+esphome:
+  name: test
+
+esp32:
+  variant: esp32p4
+  cpu_frequency: 360MHz
+  engineering_sample: false
+  framework:
+    type: esp-idf
+
+camera_encoder:
+  type: hardware
+  id: hw_encoder
+  quality: 90
+  subsampling: "4:4:4"
