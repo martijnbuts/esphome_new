@@ -20,7 +20,7 @@ static uint8_t *alloc_codec_buffer(jpeg_enc_buffer_alloc_direction_t direction, 
   return static_cast<uint8_t *>(jpeg_alloc_encoder_mem(size, &config, allocated));
 }
 
-static const LogString *sub_sample_to_str(uint8_t sub_sample) {
+static const LogString *sub_sample_to_str(jpeg_down_sampling_type_t sub_sample) {
   switch (sub_sample) {
     case JPEG_DOWN_SAMPLING_YUV444:
       return LOG_STR("4:4:4");
@@ -86,12 +86,12 @@ camera::EncoderError ESP32HardwareJPEGEncoder::encode_pixels(camera::CameraImage
       break;
     case camera::PIXEL_FORMAT_RGB565:
       config.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
-      config.sub_sample = static_cast<jpeg_down_sampling_type_t>(this->sub_sample_);
+      config.sub_sample = this->sub_sample_;
       break;
     case camera::PIXEL_FORMAT_BGR888:
       // The codec reads 24-bit pixels in B, G, R order, the same as PIXEL_FORMAT_BGR888.
       config.src_type = JPEG_ENCODE_IN_FORMAT_RGB888;
-      config.sub_sample = static_cast<jpeg_down_sampling_type_t>(this->sub_sample_);
+      config.sub_sample = this->sub_sample_;
       break;
     default:
       ESP_LOGE(TAG, "Unsupported pixel format %u", static_cast<unsigned>(spec->format));

@@ -32,7 +32,7 @@ class ESP32HardwareJPEGEncoder final : public camera::Encoder {
   /// @param sub_sample Chroma subsampling for colour images.
   /// @param output Output buffer, allocated with jpeg_alloc_encoder_mem().
   ESP32HardwareJPEGEncoder(uint8_t quality, jpeg_down_sampling_type_t sub_sample, camera::EncoderBuffer *output)
-      : output_(output), quality_(quality), sub_sample_(static_cast<uint8_t>(sub_sample)) {}
+      : output_(output), sub_sample_(sub_sample), quality_(quality) {}
   /// Sets the number of bytes to grow the output buffer by when an image does not fit.
   void set_buffer_expand_size(size_t buffer_expand_size) { this->buffer_expand_size_ = buffer_expand_size; }
   camera::EncoderError encode_pixels(camera::CameraImageSpec *spec, camera::Buffer *pixels) override;
@@ -47,8 +47,8 @@ class ESP32HardwareJPEGEncoder final : public camera::Encoder {
   uint8_t *input_{nullptr};
   size_t input_capacity_{0};
   size_t buffer_expand_size_{0};
+  jpeg_down_sampling_type_t sub_sample_;
   uint8_t quality_;
-  uint8_t sub_sample_;
 };
 
 }  // namespace esphome::camera_encoder
