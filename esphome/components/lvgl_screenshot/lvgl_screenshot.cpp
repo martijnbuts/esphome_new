@@ -28,17 +28,11 @@ void LvglScreenshot::setup() {
   }
   this->width_ = lv_display_get_horizontal_resolution(display);
   this->height_ = lv_display_get_vertical_resolution(display);
-  const uint32_t stride = this->width_ * 2;
-  this->raw_size_ = stride * this->height_;
-  RAMAllocator<uint8_t> allocator;
-  this->raw_ = allocator.allocate(this->raw_size_);
-  if (this->raw_ == nullptr) {
+  // LVGL's own allocation is aligned to LV_DRAW_BUF_ALIGN, which keeps the CPU cache in step when
+  // LVGL fills parts of the screenshot with a 2D accelerator (the PPA on the ESP32-P4).
+  this->draw_buf_ = lv_draw_buf_create(this->width_, this->height_, LV_COLOR_FORMAT_RGB565, this->width_ * 2);
+  if (this->draw_buf_ == nullptr) {
     this->mark_failed(LOG_STR("Failed to allocate the screenshot buffer"));
-    return;
-  }
-  if (lv_draw_buf_init(&this->draw_buf_, this->width_, this->height_, LV_COLOR_FORMAT_RGB565, stride, this->raw_,
-                       this->raw_size_) != LV_RESULT_OK) {
-    this->mark_failed(LOG_STR("Failed to set up the screenshot buffer"));
     return;
   }
   this->reusable_image_ = std::make_shared<ScreenshotImage>();
@@ -108,14 +102,15 @@ bool LvglScreenshot::render_() {
   // LVGL is not thread-safe, so this stays in the main loop.
   const uint32_t start = millis();
 #if LV_USE_SNAPSHOT  // Set in lv_conf.h for this component; static analysis builds LVGL without it.
-  const lv_result_t result = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &this->draw_buf_);
+  const lv_result_t result = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, this->draw_buf_);
 #else
   const lv_result_t result = LV_RESULT_INVALID;
 #endif
   this->render_ms_ = millis() - start;
   // The encoder takes the buffer as one block of rows, so the screen must fill it exactly.
-  if (result != LV_RESULT_OK || this->draw_buf_.header.w != this->width_ || this->draw_buf_.header.h != this->height_ ||
-      this->draw_buf_.header.stride != this->width_ * 2) {
+  const lv_image_header_t &header = this->draw_buf_->header;
+  if (result != LV_RESULT_OK || header.w != this->width_ || header.h != this->height_ ||
+      header.stride != this->width_ * 2) {
     ESP_LOGW(TAG, "Failed to render the screen");
     this->status_set_warning(LOG_STR("Failed to render the screen"));
     return false;
@@ -136,12 +131,13 @@ void LvglScreenshot::encode_() {
   const uint32_t start = millis();
   // LVGL renders RGB565 with the low byte first; camera encoders take the high byte first, as a
   // camera sends it.
-  auto *pixels = reinterpret_cast<uint16_t *>(this->raw_);
-  for (size_t i = 0; i < this->raw_size_ / 2; i++)
+  const size_t count = static_cast<size_t>(this->width_) * this->height_;
+  auto *pixels = reinterpret_cast<uint16_t *>(this->draw_buf_->data);
+  for (size_t i = 0; i < count; i++)
     pixels[i] = byteswap(pixels[i]);
 
   camera::CameraImageSpec spec{this->width_, this->height_, camera::PIXEL_FORMAT_RGB565};
-  RawScreenshot raw(this->raw_, this->raw_size_);
+  RawScreenshot raw(this->draw_buf_->data, count * 2);
   camera::EncoderError result = camera::ENCODER_ERROR_RETRY_FRAME;
   for (uint8_t attempt = 0; attempt < MAX_ENCODE_ATTEMPTS && result == camera::ENCODER_ERROR_RETRY_FRAME; attempt++)
     result = this->encoder_->encode_pixels(&spec, &raw);

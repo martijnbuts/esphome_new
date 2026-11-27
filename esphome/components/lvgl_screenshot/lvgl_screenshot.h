@@ -85,7 +85,7 @@ class LvglScreenshot final : public camera::Camera {
 
  protected:
   /// Hand-over between the main loop and the encoding task. While CAPTURE_STATE_BUSY the task owns
-  /// the raw buffer and the encoder; the main loop reads the result after DONE or FAILED.
+  /// the draw buffer and the encoder; the main loop reads the result after DONE or FAILED.
   enum class CaptureState : uint8_t {
     CAPTURE_STATE_IDLE,
     CAPTURE_STATE_BUSY,
@@ -103,13 +103,11 @@ class LvglScreenshot final : public camera::Camera {
   uint32_t last_stream_frame_{0};
   uint32_t render_ms_{0};
   uint32_t encode_ms_{0};
-  uint8_t *raw_{nullptr};
-  size_t raw_size_{0};
   TaskHandle_t task_{nullptr};
   std::shared_ptr<ScreenshotImage> reusable_image_;
   std::shared_ptr<ScreenshotImage> current_image_;
   camera::CameraListener **listeners_{nullptr};
-  lv_draw_buf_t draw_buf_{};
+  lv_draw_buf_t *draw_buf_{nullptr};
   std::atomic<CaptureState> state_{CaptureState::CAPTURE_STATE_IDLE};
   camera::EncoderError encode_result_{camera::ENCODER_ERROR_SUCCESS};
   uint16_t width_{0};
