@@ -1,0 +1,13 @@
+lvgl:
+  widgets:
+    - label:
+        text: Screenshot test
+
+camera_encoder:
+  id: screenshot_encoder
+  quality: 70
+
+lvgl_screenshot:
+  name: Screenshot
+  encoder: screenshot_encoder
+  stream_interval: 2s
