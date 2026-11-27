@@ -36,8 +36,11 @@ void LvglScreenshot::setup() {
     this->mark_failed(LOG_STR("Failed to allocate the screenshot buffer"));
     return;
   }
-  lv_draw_buf_init(&this->draw_buf_, this->width_, this->height_, LV_COLOR_FORMAT_RGB565, stride, this->raw_,
-                   this->raw_size_);
+  if (lv_draw_buf_init(&this->draw_buf_, this->width_, this->height_, LV_COLOR_FORMAT_RGB565, stride, this->raw_,
+                       this->raw_size_) != LV_RESULT_OK) {
+    this->mark_failed(LOG_STR("Failed to set up the screenshot buffer"));
+    return;
+  }
   this->reusable_image_ = std::make_shared<ScreenshotImage>();
   if (xTaskCreate(LvglScreenshot::encode_task, "lvgl_screenshot", ENCODE_TASK_STACK_SIZE, this, ENCODE_TASK_PRIORITY,
                   &this->task_) != pdPASS) {
