@@ -17,8 +17,6 @@ ESPHOME_LOG_TAG(TAG, "lvgl_screenshot");
 static constexpr uint32_t ENCODE_TASK_STACK_SIZE = 6144;
 /// The same as the main loop; on a dual-core chip the task mostly runs on the other core.
 static constexpr UBaseType_t ENCODE_TASK_PRIORITY = 1;
-/// Each retry follows a larger output buffer, so this bounds how often a screenshot is encoded.
-static constexpr uint8_t MAX_ENCODE_ATTEMPTS = 8;
 
 void LvglScreenshot::setup() {
   lv_display_t *display = lv_display_get_default();
@@ -138,9 +136,11 @@ void LvglScreenshot::encode_() {
 
   camera::CameraImageSpec spec{this->width_, this->height_, camera::PIXEL_FORMAT_RGB565};
   RawScreenshot raw(this->draw_buf_->data, count * 2);
-  camera::EncoderError result = camera::ENCODER_ERROR_RETRY_FRAME;
-  for (uint8_t attempt = 0; attempt < MAX_ENCODE_ATTEMPTS && result == camera::ENCODER_ERROR_RETRY_FRAME; attempt++)
-    result = this->encoder_->encode_pixels(&spec, &raw);
+  // The encoder asks for a retry after it grew its output buffer, or while it encodes in steps. It stops asking by
+  // itself when the buffer cannot grow any further.
+  camera::EncoderError result;
+  while ((result = this->encoder_->encode_pixels(&spec, &raw)) == camera::ENCODER_ERROR_RETRY_FRAME)
+    vTaskDelay(1);  // Lets the idle task run, which the task watchdog checks.
   this->encode_ms_ = millis() - start;
   this->encode_result_ = result;
   this->state_.store(
