@@ -33,6 +33,13 @@ void LvglScreenshot::setup() {
     this->mark_failed(LOG_STR("Failed to allocate the screenshot buffer"));
     return;
   }
+  // The encoder's output buffer starts small (4 kB for the default encoder) and grows a little per retry, and every
+  // retry encodes the whole screen again. A JPEG of a screen rarely needs more than 2 bits per pixel.
+  camera::EncoderBuffer *output = this->encoder_->get_output_buffer();
+  const size_t expected_jpeg_size = static_cast<size_t>(this->width_) * this->height_ / 4;
+  if (output->get_max_size() < expected_jpeg_size && !output->set_buffer_size(expected_jpeg_size)) {
+    ESP_LOGW(TAG, "Could not reserve %zu bytes for the JPEG", expected_jpeg_size);
+  }
   this->reusable_image_ = std::make_shared<ScreenshotImage>();
   if (xTaskCreate(LvglScreenshot::encode_task, "lvgl_screenshot", ENCODE_TASK_STACK_SIZE, this, ENCODE_TASK_PRIORITY,
                   &this->task_) != pdPASS) {
